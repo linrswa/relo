@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"relo/internal/domain"
+	"relo/internal/render"
 	"relo/internal/store"
 
 	"github.com/spf13/cobra"
@@ -17,6 +19,7 @@ import (
 type app struct{}
 
 func Execute() int {
+	jsonErrorWritten = false
 	a := &app{}
 	cmd := a.rootCmd()
 	if _, _, err := cmd.Find(os.Args[1:]); err != nil {
@@ -24,7 +27,13 @@ func Execute() int {
 		return 2
 	}
 	if err := cmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		jsonMode := argsRequestJSON(os.Args[1:])
+		if !jsonErrorWritten && jsonMode {
+			_ = json.NewEncoder(os.Stdout).Encode(errorEnvelope(executeJSONErrorCode(err), err.Error()))
+		}
+		if !jsonMode {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		var ve store.ValidationError
 		if errors.As(err, &ve) || errors.Is(err, sql.ErrNoRows) {
 			return 2
@@ -34,12 +43,32 @@ func Execute() int {
 	return 0
 }
 
+func executeJSONErrorCode(err error) string {
+	var ve store.ValidationError
+	if errors.As(err, &ve) {
+		return "INVALID_ARGUMENT"
+	}
+	return jsonErrorCode(err)
+}
+
+func argsRequestJSON(args []string) bool {
+	for i, arg := range args {
+		if arg == "--json" || arg == "--json=true" || arg == "--format=json" {
+			return true
+		}
+		if arg == "--format" && i+1 < len(args) && args[i+1] == "json" {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *app) rootCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "relo", SilenceUsage: true, SilenceErrors: true}
 	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return store.ValidationError{Message: err.Error()}
 	})
-	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.validateCmd())
+	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.validateCmd(), a.graphCmd(), a.statusCmd())
 	return cmd
 }
 
@@ -105,7 +134,12 @@ func (a *app) initCmd() *cobra.Command {
 
 func (a *app) projectCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "project"}
-	cmd.AddCommand(&cobra.Command{Use: "show", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd.AddCommand(a.projectShowCmd(), a.projectUpdateCmd(), a.projectRefreshPRDCmd())
+	return cmd
+}
+
+func (a *app) projectShowCmd() *cobra.Command {
+	return &cobra.Command{Use: "show", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -117,7 +151,141 @@ func (a *app) projectCmd() *cobra.Command {
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Goal: %s\nPRD: %s\nPRD hash: %s\n", p.Goal, p.PRDPath, p.PRDHash)
 		return nil
-	}})
+	}}
+}
+
+func (a *app) projectUpdateCmd() *cobra.Command {
+	var goal, prd string
+	cmd := &cobra.Command{Use: "update", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+		var goalPtr, prdPtr *string
+		if cmd.Flags().Changed("goal") {
+			if strings.TrimSpace(goal) == "" {
+				return store.ValidationError{Message: "--goal must not be empty"}
+			}
+			goalPtr = &goal
+		}
+		if cmd.Flags().Changed("prd") {
+			if strings.TrimSpace(prd) == "" {
+				return store.ValidationError{Message: "--prd must not be empty"}
+			}
+			prdPtr = &prd
+		}
+		if goalPtr == nil && prdPtr == nil {
+			return store.ValidationError{Message: "at least one of --goal or --prd is required"}
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		p, err := s.UpdateProject(cmd.Context(), goalPtr, prdPtr)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Updated relo project\nGoal: %s\nPRD: %s\nPRD hash: %s\n", p.Goal, p.PRDPath, p.PRDHash)
+		return nil
+	}}
+	cmd.Flags().StringVar(&goal, "goal", "", "project goal")
+	cmd.Flags().StringVar(&prd, "prd", "", "PRD path")
+	return cmd
+}
+
+func (a *app) projectRefreshPRDCmd() *cobra.Command {
+	return &cobra.Command{Use: "refresh-prd", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		oldHash, newHash, p, err := s.RefreshPRDHash(cmd.Context())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Refreshed PRD hash\nPRD: %s\nOld hash: %s\nNew hash: %s\n", p.PRDPath, oldHash, newHash)
+		return nil
+	}}
+}
+
+func (a *app) graphCmd() *cobra.Command {
+	var format string
+	cmd := &cobra.Command{Use: "graph", RunE: func(cmd *cobra.Command, args []string) error {
+		jsonOut := format == "json"
+		if len(args) != 0 {
+			err := store.ValidationError{Message: fmt.Sprintf("accepts 0 arg(s), received %d", len(args))}
+			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
+		}
+		if format != "tree" && format != "json" {
+			err := store.ValidationError{Message: "--format must be tree or json"}
+			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
+			return err
+		}
+		defer s.Close()
+		p, err := s.Project(cmd.Context())
+		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
+			return err
+		}
+		g, err := s.Graph(cmd.Context())
+		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
+			return err
+		}
+		if c := g.Cycle(); len(c) > 0 {
+			err := store.ValidationError{Message: "dependency graph has cycle: " + strings.Join(c, " -> ")}
+			writeJSONError(cmd, jsonOut, "VALIDATION_ERROR", err)
+			return err
+		}
+		if jsonOut {
+			return writeJSONOK(cmd, render.Payload(p.Goal, g))
+		}
+		out, err := render.Tree(p.Goal, g)
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(cmd.OutOrStdout(), out)
+		return nil
+	}}
+	cmd.Flags().StringVar(&format, "format", "tree", "")
+	return cmd
+}
+
+func (a *app) statusCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			err := store.ValidationError{Message: fmt.Sprintf("accepts 0 arg(s), received %d", len(args))}
+			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
+			return err
+		}
+		defer s.Close()
+		g, err := s.Graph(cmd.Context())
+		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
+			return err
+		}
+		if c := g.Cycle(); len(c) > 0 {
+			err := store.ValidationError{Message: "dependency graph has cycle: " + strings.Join(c, " -> ")}
+			writeJSONError(cmd, jsonOut, "VALIDATION_ERROR", err)
+			return err
+		}
+		if jsonOut {
+			return writeJSONOK(cmd, map[string]any{"summary": render.Summary(g)})
+		}
+		fmt.Fprint(cmd.OutOrStdout(), render.Status(g))
+		return nil
+	}}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "")
 	return cmd
 }
 
@@ -161,38 +329,42 @@ func (a *app) taskCreateCmd() *cobra.Command {
 
 func (a *app) taskGetCmd() *cobra.Command {
 	var title string
-	cmd := &cobra.Command{Use: "get [TASK-ID]", Args: func(cmd *cobra.Command, args []string) error {
+	var jsonOut bool
+	cmd := &cobra.Command{Use: "get [TASK-ID]", RunE: func(cmd *cobra.Command, args []string) error {
 		if title == "" && len(args) != 1 {
-			return store.ValidationError{Message: "provide TASK-ID or --title"}
+			err := store.ValidationError{Message: "provide TASK-ID or --title"}
+			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
 		}
 		if title != "" && len(args) != 0 {
-			return store.ValidationError{Message: "--title cannot be combined with TASK-ID"}
+			err := store.ValidationError{Message: "--title cannot be combined with TASK-ID"}
+			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
 		}
-		return nil
-	}, RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
 		defer s.Close()
-		var t *domain.Task
+		var snap store.TaskReadSnapshot
 		if title != "" {
-			tt, _, err := s.GetTaskByTitle(cmd.Context(), title)
-			if err != nil {
-				return err
-			}
-			t = tt
+			snap, err = s.TaskReadSnapshotByTitle(cmd.Context(), title)
 		} else {
-			t, err = s.GetTask(cmd.Context(), args[0])
-			if err != nil {
-				return err
-			}
+			snap, err = s.TaskReadSnapshot(cmd.Context(), args[0])
 		}
-		p, _ := s.Project(cmd.Context())
-		renderTask(cmd.OutOrStdout(), p, t)
+		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
+			return err
+		}
+		if jsonOut {
+			return writeJSONOK(cmd, toTaskGetDTO(snap))
+		}
+		renderTask(cmd.OutOrStdout(), &snap.Project, &snap.Task)
 		return nil
 	}}
 	cmd.Flags().StringVar(&title, "title", "", "")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "")
 	return cmd
 }
 

@@ -33,6 +33,22 @@ type Store struct {
 
 type Tx struct{ tx *sql.Tx }
 
+func (s *Store) WithReadTx(ctx context.Context, fn func(*Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	if err := fn(&Tx{tx: tx}); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return nil
+}
+
 func Open(path string) (*Store, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate", path)
 	db, err := sql.Open("sqlite", dsn)
@@ -221,6 +237,90 @@ func sleepBeforeRetry(attempt int) { time.Sleep(time.Duration(attempt+1) * 50 * 
 func (s *Store) Project(ctx context.Context) (*domain.Project, error) { return project(ctx, s.db) }
 func (tx *Tx) Project(ctx context.Context) (*domain.Project, error)   { return project(ctx, tx.tx) }
 
+func (s *Store) UpdateProject(ctx context.Context, goal *string, prd *string) (*domain.Project, error) {
+	if goal == nil && prd == nil {
+		return nil, validation("at least one of --goal or --prd is required")
+	}
+	if goal != nil && strings.TrimSpace(*goal) == "" {
+		return nil, validation("--goal must not be empty")
+	}
+	if prd != nil && strings.TrimSpace(*prd) == "" {
+		return nil, validation("--prd must not be empty")
+	}
+	err := s.WithWriteTx(ctx, func(tx *Tx) error {
+		p, err := tx.Project(ctx)
+		if err != nil {
+			return err
+		}
+		newGoal := p.Goal
+		newPRDPath := p.PRDPath
+		newPRDHash := p.PRDHash
+		if goal != nil {
+			newGoal = *goal
+		}
+		if prd != nil {
+			resolved, hash, err := s.resolveAndHashPRD(*prd)
+			if err != nil {
+				return err
+			}
+			newPRDPath = resolved
+			newPRDHash = hash
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		_, err = tx.tx.ExecContext(ctx, `UPDATE projects SET goal=?, prd_path=?, prd_hash=?, updated_at=? WHERE id=1`, newGoal, newPRDPath, newPRDHash, now)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.Project(ctx)
+}
+
+func (s *Store) RefreshPRDHash(ctx context.Context) (oldHash, newHash string, p *domain.Project, err error) {
+	err = s.WithWriteTx(ctx, func(tx *Tx) error {
+		current, err := tx.Project(ctx)
+		if err != nil {
+			return err
+		}
+		oldHash = current.PRDHash
+		path := current.PRDPath
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(s.root, path)
+		}
+		newHash, err = HashFile(path)
+		if err != nil {
+			return validation("cannot read current PRD %q: %v", current.PRDPath, err)
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		_, err = tx.tx.ExecContext(ctx, `UPDATE projects SET prd_hash=?, updated_at=? WHERE id=1`, newHash, now)
+		return err
+	})
+	if err != nil {
+		return "", "", nil, err
+	}
+	p, err = s.Project(ctx)
+	return oldHash, newHash, p, err
+}
+
+func (s *Store) resolveAndHashPRD(prd string) (string, string, error) {
+	cleaned := filepath.Clean(prd)
+	abs := cleaned
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(s.root, cleaned)
+	}
+	hash, err := HashFile(abs)
+	if err != nil {
+		return "", "", validation("cannot read PRD %q relative to project root %s: %v", prd, s.root, err)
+	}
+	persist := cleaned
+	if filepath.IsAbs(cleaned) {
+		if rel, err := filepath.Rel(s.root, cleaned); err == nil && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
+			persist = rel
+		}
+	}
+	return persist, hash, nil
+}
+
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
@@ -275,8 +375,17 @@ func (s *Store) CreateTask(ctx context.Context, title, objective string, accepts
 func (s *Store) GetTask(ctx context.Context, id string) (*domain.Task, error) {
 	return getTask(ctx, s.db, id)
 }
+func (tx *Tx) GetTask(ctx context.Context, id string) (*domain.Task, error) {
+	return getTask(ctx, tx.tx, id)
+}
 func (s *Store) GetTaskByTitle(ctx context.Context, title string) (*domain.Task, []string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM tasks WHERE title=? ORDER BY priority, creation_order, id`, title)
+	return getTaskByTitle(ctx, s.db, title)
+}
+func (tx *Tx) GetTaskByTitle(ctx context.Context, title string) (*domain.Task, []string, error) {
+	return getTaskByTitle(ctx, tx.tx, title)
+}
+func getTaskByTitle(ctx context.Context, q queryer, title string) (*domain.Task, []string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id FROM tasks WHERE title=? ORDER BY priority, creation_order, id`, title)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -298,7 +407,7 @@ func (s *Store) GetTaskByTitle(ctx context.Context, title string) (*domain.Task,
 	if len(ids) > 1 {
 		return nil, ids, validation("title %q is ambiguous: %s", title, strings.Join(ids, ", "))
 	}
-	t, err := s.GetTask(ctx, ids[0])
+	t, err := getTask(ctx, q, ids[0])
 	return t, nil, err
 }
 func getTask(ctx context.Context, q queryer, id string) (*domain.Task, error) {

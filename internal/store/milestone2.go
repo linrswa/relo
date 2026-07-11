@@ -381,18 +381,96 @@ func requireExistingTasks(ctx context.Context, q queryer, label string, ids []st
 }
 
 func (tx *Tx) graph(ctx context.Context) (dag.Graph, error)   { return loadGraph(ctx, tx.tx) }
-func (s *Store) graph(ctx context.Context) (dag.Graph, error) { return loadGraph(ctx, s.db) }
+func (s *Store) graph(ctx context.Context) (dag.Graph, error) { return s.Graph(ctx) }
+
+type TaskReadSnapshot struct {
+	Project domain.Project
+	Task    domain.Task
+}
+
+type ReadyReadSnapshot struct {
+	Graph dag.Graph
+	Tasks []domain.Task
+}
+
+func (s *Store) Graph(ctx context.Context) (dag.Graph, error) {
+	var g dag.Graph
+	err := s.WithReadTx(ctx, func(tx *Tx) error {
+		var err error
+		g, err = tx.graph(ctx)
+		return err
+	})
+	return g, err
+}
+
+func (s *Store) TaskReadSnapshot(ctx context.Context, id string) (TaskReadSnapshot, error) {
+	var snap TaskReadSnapshot
+	err := s.WithReadTx(ctx, func(tx *Tx) error {
+		p, err := tx.Project(ctx)
+		if err != nil {
+			return err
+		}
+		t, err := tx.GetTask(ctx, id)
+		if err != nil {
+			return err
+		}
+		snap.Project = *p
+		snap.Task = *t
+		return nil
+	})
+	return snap, err
+}
+
+func (s *Store) TaskReadSnapshotByTitle(ctx context.Context, title string) (TaskReadSnapshot, error) {
+	var snap TaskReadSnapshot
+	err := s.WithReadTx(ctx, func(tx *Tx) error {
+		p, err := tx.Project(ctx)
+		if err != nil {
+			return err
+		}
+		t, _, err := tx.GetTaskByTitle(ctx, title)
+		if err != nil {
+			return err
+		}
+		snap.Project = *p
+		snap.Task = *t
+		return nil
+	})
+	return snap, err
+}
+
+func (s *Store) ReadyReadSnapshot(ctx context.Context) (ReadyReadSnapshot, error) {
+	var snap ReadyReadSnapshot
+	err := s.WithReadTx(ctx, func(tx *Tx) error {
+		g, err := tx.graph(ctx)
+		if err != nil {
+			return err
+		}
+		snap.Graph = g
+		ready := g.Ready()
+		snap.Tasks = make([]domain.Task, 0, len(ready))
+		for _, rt := range ready {
+			t, err := tx.GetTask(ctx, rt.ID)
+			if err != nil {
+				return err
+			}
+			snap.Tasks = append(snap.Tasks, *t)
+		}
+		return nil
+	})
+	return snap, err
+}
 
 func loadGraph(ctx context.Context, q queryer) (dag.Graph, error) {
 	g := dag.Graph{Tasks: map[string]dag.Task{}, Deps: map[string][]string{}}
-	rows, err := q.QueryContext(ctx, `SELECT id,priority,creation_order,status FROM tasks`)
+	rows, err := q.QueryContext(ctx, `SELECT id,title,priority,creation_order,status FROM tasks`)
 	if err != nil {
 		return g, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var t dag.Task
-		if err := rows.Scan(&t.ID, &t.Priority, &t.CreationOrder, &t.Status); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Priority, &t.CreationOrder, &t.Status); err != nil {
 			return g, err
 		}
 		g.Tasks[t.ID] = t
@@ -416,20 +494,8 @@ func loadGraph(ctx context.Context, q queryer) (dag.Graph, error) {
 }
 
 func (s *Store) ReadyTasks(ctx context.Context) ([]domain.Task, error) {
-	g, err := s.graph(ctx)
-	if err != nil {
-		return nil, err
-	}
-	ready := g.Ready()
-	out := make([]domain.Task, 0, len(ready))
-	for _, rt := range ready {
-		t, err := s.GetTask(ctx, rt.ID)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *t)
-	}
-	return out, nil
+	snap, err := s.ReadyReadSnapshot(ctx)
+	return snap.Tasks, err
 }
 
 type missingDependencyEndpoint struct {

@@ -9,6 +9,7 @@ import (
 
 type Task struct {
 	ID            string
+	Title         string
 	Priority      int
 	CreationOrder int
 	Status        string

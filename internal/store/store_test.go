@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newProject(t *testing.T) (*Store, string) {
@@ -44,6 +45,41 @@ func taskStatus(t *testing.T, ctx context.Context, s *Store, id string) string {
 	return task.Status
 }
 
+func TestReadSnapshotsAssembleConsistentPayloads(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	dep := createTaskForRuntime(t, ctx, s, "dep")
+	down := createTaskForRuntime(t, ctx, s, "down")
+	if _, err := s.AddNote(ctx, dep, "note"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddDependencies(ctx, down, []string{dep}, "needs", nil); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.TaskReadSnapshot(ctx, down)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Project.Goal != "goal" || snap.Project.PRDPath != "prd.md" || snap.Task.ID != down || len(snap.Task.AcceptanceCriteria) != 1 || len(snap.Task.Dependencies) != 1 {
+		t.Fatalf("unexpected task snapshot: %#v", snap)
+	}
+	if snap.Task.Dependencies[0].DependencyID != dep || snap.Task.Dependencies[0].Reason != "needs" || snap.Task.Dependencies[0].Title != "dep" || snap.Task.Dependencies[0].Status != "pending" {
+		t.Fatalf("unexpected dependency snapshot: %#v", snap.Task.Dependencies[0])
+	}
+	titleSnap, err := s.TaskReadSnapshotByTitle(ctx, "down")
+	if err != nil || titleSnap.Task.ID != down || titleSnap.Project.Goal != "goal" {
+		t.Fatalf("title snapshot = %#v err=%v", titleSnap, err)
+	}
+	ready, err := s.ReadyReadSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready.Graph.Tasks) != 2 || len(ready.Tasks) != 1 || ready.Tasks[0].ID != dep || len(ready.Tasks[0].Notes) != 1 {
+		t.Fatalf("unexpected ready snapshot: %#v", ready)
+	}
+}
+
 func TestInitProjectMigrateAndRepeatGuard(t *testing.T) {
 	ctx := context.Background()
 	s, root := newProject(t)
@@ -65,6 +101,96 @@ func TestInitProjectMigrateAndRepeatGuard(t *testing.T) {
 	}
 	if _, err := InitProject(ctx, root, "prd.md", "again"); err == nil {
 		t.Fatal("repeat init succeeded")
+	}
+}
+
+func TestProjectUpdateGoalPRDAndRollback(t *testing.T) {
+	ctx := context.Background()
+	s, root := newProject(t)
+	defer s.Close()
+
+	p, err := s.UpdateProject(ctx, stringPtr("new goal"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Goal != "new goal" || p.PRDPath != "prd.md" {
+		t.Fatalf("goal update project = %#v", p)
+	}
+	if _, err := s.UpdateProject(ctx, stringPtr(""), nil); err == nil || !strings.Contains(err.Error(), "--goal must not be empty") {
+		t.Fatalf("empty goal err = %v", err)
+	}
+	if _, err := s.UpdateProject(ctx, nil, nil); err == nil || !strings.Contains(err.Error(), "at least one") {
+		t.Fatalf("no flags err = %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "prd2.md"), []byte("prd2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p, err = s.UpdateProject(ctx, nil, stringPtr("docs/prd2.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash, err := HashFile(filepath.Join(root, "docs", "prd2.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Goal != "new goal" || p.PRDPath != filepath.Join("docs", "prd2.md") || p.PRDHash != wantHash {
+		t.Fatalf("prd update project = %#v want hash %s", p, wantHash)
+	}
+
+	before := *p
+	if _, err := s.UpdateProject(ctx, stringPtr("rolled back"), stringPtr("missing.md")); err == nil || !strings.Contains(err.Error(), "cannot read PRD") {
+		t.Fatalf("missing prd err = %v", err)
+	}
+	after, err := s.Project(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Goal != before.Goal || after.PRDPath != before.PRDPath || after.PRDHash != before.PRDHash {
+		t.Fatalf("project changed after rollback: before=%#v after=%#v", before, after)
+	}
+}
+
+func stringPtr(s string) *string { return &s }
+
+func TestRefreshPRDHashChangedAndUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s, root := newProject(t)
+	defer s.Close()
+
+	before, err := s.Project(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldHash, newHash, p, err := s.RefreshPRDHash(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldHash != before.PRDHash || newHash == oldHash || p.PRDHash != newHash {
+		t.Fatalf("changed refresh old=%s new=%s project=%#v before=%#v", oldHash, newHash, p, before)
+	}
+	report, err := s.Validate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(report.Warnings, "\n"), "PRD content hash has changed") {
+		t.Fatalf("refresh did not clear PRD warning: %#v", report.Warnings)
+	}
+
+	beforeUnchanged := p.UpdatedAt
+	time.Sleep(time.Millisecond)
+	oldHash, newHash, p, err = s.RefreshPRDHash(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldHash != newHash || p.PRDHash != newHash || p.UpdatedAt == beforeUnchanged {
+		t.Fatalf("unchanged refresh old=%s new=%s project=%#v previous updated_at=%s", oldHash, newHash, p, beforeUnchanged)
 	}
 }
 
@@ -315,6 +441,34 @@ func TestAcceptanceNotesDependenciesReadyValidateAndRollback(t *testing.T) {
 	joined := strings.Join(report.Warnings, "\n")
 	if !strings.Contains(joined, "PRD content hash has changed") || !strings.Contains(joined, "has no notes") || !strings.Contains(joined, "multiple tasks use priority 1") {
 		t.Fatalf("warnings = %v", report.Warnings)
+	}
+}
+
+func TestGraphIncludesTitlesAndDependencies(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+
+	id1, err := s.CreateTask(ctx, "one", "objective", []string{"ac"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := s.CreateTask(ctx, "two", "objective", []string{"ac"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddDependencies(ctx, id2, []string{id1}, "required", nil); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Graph(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Tasks[id1].Title != "one" || g.Tasks[id2].Title != "two" {
+		t.Fatalf("graph titles = %#v", g.Tasks)
+	}
+	if len(g.Deps[id2]) != 1 || g.Deps[id2][0] != id1 {
+		t.Fatalf("graph deps = %#v", g.Deps)
 	}
 }
 

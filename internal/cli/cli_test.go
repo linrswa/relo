@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +93,88 @@ func TestCLIInitRootDiscoveryTaskCRUD(t *testing.T) {
 	}
 	if out, stderr, err = run(t, sub, "task", "delete", "TASK-001"); err != nil {
 		t.Fatalf("delete failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+}
+
+func TestCLIProjectUpdateRefreshPRDFromSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "prd2.md"), []byte("prd2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatalf("init failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	sub := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, err := run(t, sub, "project", "update", "--goal", "new goal")
+	if err != nil {
+		t.Fatalf("project goal update failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(out, "Goal: new goal") || !strings.Contains(out, "PRD: prd.md") {
+		t.Fatalf("unexpected goal update output: %s", out)
+	}
+	out, stderr, err = run(t, sub, "project", "update", "--prd", filepath.Join("docs", "prd2.md"))
+	if err != nil {
+		t.Fatalf("project prd update failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(out, "Goal: new goal") || !strings.Contains(out, "PRD: "+filepath.Join("docs", "prd2.md")) || !strings.Contains(out, "PRD hash:") {
+		t.Fatalf("unexpected prd update output: %s", out)
+	}
+	if out, stderr, err = run(t, sub, "project", "update"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "at least one of --goal or --prd") {
+		t.Fatalf("project update without flags out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if out, stderr, err = run(t, sub, "project", "update", "--prd", ""); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "--prd must not be empty") {
+		t.Fatalf("project update empty prd out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if out, stderr, err = run(t, sub, "project", "update", "--goal", "rolled back", "--prd", "missing.md"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "cannot read PRD") {
+		t.Fatalf("project update missing prd out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	out, stderr, err = run(t, sub, "project", "show")
+	if err != nil {
+		t.Fatalf("project show failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(out, "Goal: new goal") || strings.Contains(out, "rolled back") {
+		t.Fatalf("atomic rollback failed, show output: %s", out)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "docs", "prd2.md"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, err = run(t, sub, "validate")
+	if err != nil {
+		t.Fatalf("validate changed failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(stderr, "PRD content hash has changed") {
+		t.Fatalf("validate did not warn about changed PRD: out=%s stderr=%s", out, stderr)
+	}
+	out, stderr, err = run(t, sub, "project", "refresh-prd")
+	if err != nil {
+		t.Fatalf("refresh changed failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(out, "Old hash:") || !strings.Contains(out, "New hash:") {
+		t.Fatalf("refresh did not print old/new hash: %s", out)
+	}
+	out, stderr, err = run(t, sub, "validate")
+	if err != nil {
+		t.Fatalf("validate refreshed failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if strings.Contains(out+stderr, "PRD content hash has changed") {
+		t.Fatalf("validate warning not cleared after refresh: out=%s stderr=%s", out, stderr)
+	}
+	out, stderr, err = run(t, sub, "project", "refresh-prd")
+	if err != nil {
+		t.Fatalf("refresh unchanged failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(out, "Old hash:") || !strings.Contains(out, "New hash:") {
+		t.Fatalf("unchanged refresh did not print old/new hash: %s", out)
 	}
 }
 
@@ -187,8 +270,43 @@ func TestCLIMilestone2Commands(t *testing.T) {
 	if err != nil {
 		t.Fatal(stderr, err)
 	}
-	if !strings.Contains(out, `"schemaVersion":"relo.output/v1"`) || !strings.Contains(out, `"ok":true`) || !strings.Contains(out, "TASK-001") || strings.Contains(out, "TASK-003") {
-		t.Fatalf("unexpected ready json: %s", out)
+	var readyEnv struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Tasks []struct {
+				ID                 string `json:"id"`
+				Title              string `json:"title"`
+				Status             string `json:"status"`
+				Priority           int    `json:"priority"`
+				Objective          string `json:"objective"`
+				AcceptanceCriteria []struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				} `json:"acceptance_criteria"`
+				Dependencies []struct {
+					TaskID       string `json:"task_id"`
+					DependencyID string `json:"dependency_id"`
+					Status       string `json:"status"`
+					Reason       string `json:"reason"`
+					Title        string `json:"title"`
+				} `json:"dependencies"`
+				Notes []struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				} `json:"notes"`
+			} `json:"tasks"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &readyEnv); err != nil {
+		t.Fatalf("invalid ready json %q: %v", out, err)
+	}
+	if !readyEnv.OK || len(readyEnv.Data.Tasks) != 2 || readyEnv.Data.Tasks[0].ID != "TASK-001" || readyEnv.Data.Tasks[1].ID != "TASK-002" {
+		t.Fatalf("unexpected ready json: %#v stdout=%s", readyEnv, out)
+	}
+	for _, task := range readyEnv.Data.Tasks {
+		if task.AcceptanceCriteria == nil || task.Dependencies == nil || task.Notes == nil || task.ID == "TASK-003" {
+			t.Fatalf("ready task has unstable arrays or blocked task: %#v stdout=%s", task, out)
+		}
 	}
 	out, stderr, err = run(t, root, "validate")
 	if err != nil {
@@ -205,6 +323,464 @@ func TestCLIMilestone2Commands(t *testing.T) {
 	out, stderr, err = run(t, root, "task", "get", "TASK-003")
 	if err != nil || !strings.Contains(out, "TASK-001 (pending): updated") || !strings.Contains(out, "TASK-002 (pending): two") {
 		t.Fatalf("remove was not rolled back or get failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+}
+
+func TestCLIGraphTreeAndJSON(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "Add task priority support"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	for _, name := range []string{"Add priority model", "Prepare UI primitives", "Add priority API", "Add priority badge", "Add priority selector", "Add priority filtering"} {
+		if _, stderr, err := run(t, root, "task", "create", "--title", name, "--objective", "O", "--accept", "A"); err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	deps := [][]string{{"TASK-003", "TASK-001"}, {"TASK-004", "TASK-001", "TASK-002"}, {"TASK-005", "TASK-003", "TASK-004"}, {"TASK-006", "TASK-005"}}
+	for _, dep := range deps {
+		args := append([]string{"task", "dependency", "add"}, dep...)
+		args = append(args, "--reason", "required")
+		if _, stderr, err := run(t, root, args...); err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-001"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "pass", "TASK-001", "--summary", "done"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-002"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err := run(t, root, "graph")
+	if err != nil {
+		t.Fatalf("graph failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	for _, want := range []string{"🎯 Goal: Add task priority support", "also requires: TASK-004", "↗ TASK-005  already shown", "Running: TASK-002", "Ready:   TASK-003", "Blocked: TASK-004, TASK-005, TASK-006"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("graph output missing %q:\n%s", want, out)
+		}
+	}
+	out2, stderr, err := run(t, root, "graph", "--format", "tree")
+	if err != nil || out2 != out {
+		t.Fatalf("graph tree not deterministic out=%s out2=%s stderr=%s err=%v", out, out2, stderr, err)
+	}
+	jsonOut, stderr, err := run(t, root, "graph", "--format", "json")
+	if err != nil {
+		t.Fatalf("graph json failed out=%s stderr=%s err=%v", jsonOut, stderr, err)
+	}
+	for _, want := range []string{"\"schemaVersion\":\"relo.output/v1\"", "\"ok\":true", "\"project_goal\":\"Add task priority support\"", "\"task_id\":\"TASK-005\"", "\"dependency_id\":\"TASK-004\"", "\"blocked\":[\"TASK-004\",\"TASK-005\",\"TASK-006\"]"} {
+		if !strings.Contains(jsonOut, want) {
+			t.Fatalf("graph json missing %q:\n%s", want, jsonOut)
+		}
+	}
+}
+
+func TestCLIEndToEndScenario(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("# Agent PRD\n\nBuild the MVP through delegated tasks."), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "ship delegated MVP"); err != nil || !strings.Contains(out, "Initialized relo project") {
+		t.Fatalf("init out=%s stderr=%s err=%v", out, stderr, err)
+	}
+
+	creates := []struct {
+		title    string
+		priority string
+	}{
+		{title: "Implement storage", priority: "10"},
+		{title: "Implement worker", priority: "20"},
+		{title: "Add configuration", priority: "30"},
+		{title: "Wire integration", priority: "40"},
+	}
+	for i, c := range creates {
+		out, stderr, err := run(t, root, "task", "create", "--title", c.title, "--objective", "Complete "+c.title, "--accept", "done", "--priority", c.priority)
+		wantID := []string{"TASK-001", "TASK-002", "TASK-003", "TASK-004"}[i]
+		if err != nil || strings.TrimSpace(out) != wantID {
+			t.Fatalf("create %s out=%s stderr=%s err=%v", c.title, out, stderr, err)
+		}
+		if _, stderr, err := run(t, root, "task", "note", "add", wantID, "--text", "created by CLI"); err != nil {
+			t.Fatalf("note %s stderr=%s err=%v", wantID, stderr, err)
+		}
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "add", "TASK-004", "TASK-001", "TASK-002", "--reason", "integration needs completed components"); err != nil {
+		t.Fatalf("initial dependency add stderr=%s err=%v", stderr, err)
+	}
+
+	if out, stderr, err := run(t, root, "validate"); err != nil || strings.TrimSpace(out) != "OK" || stderr != "" {
+		t.Fatalf("validate out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	graphOut, stderr, err := run(t, root, "graph")
+	if err != nil {
+		t.Fatalf("graph out=%s stderr=%s err=%v", graphOut, stderr, err)
+	}
+	for _, want := range []string{"🎯 Goal: ship delegated MVP", "TASK-001", "TASK-002", "TASK-004", "Blocked: TASK-004"} {
+		if !strings.Contains(graphOut, want) {
+			t.Fatalf("graph missing %q:\n%s", want, graphOut)
+		}
+	}
+
+	readyOut, stderr, err := run(t, root, "task", "ready")
+	if err != nil {
+		t.Fatalf("ready out=%s stderr=%s err=%v", readyOut, stderr, err)
+	}
+	if got := strings.Join(strings.Fields(readyOut), ","); got != "TASK-001,TASK-002,TASK-003" {
+		t.Fatalf("initial ready = %q", got)
+	}
+	if out, stderr, err := run(t, root, "task", "get", "--title", "Implement worker"); err != nil || !strings.Contains(out, "# TASK-002 Implement worker") {
+		t.Fatalf("get by title out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	startOut, stderr, err := run(t, root, "task", "start", "TASK-001", "TASK-002")
+	if err != nil || strings.Join(strings.Fields(startOut), ",") != "TASK-001,TASK-002" {
+		t.Fatalf("start two out=%s stderr=%s err=%v", startOut, stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "pass", "TASK-001", "--summary", "storage complete"); err != nil {
+		t.Fatalf("pass TASK-001 stderr=%s err=%v", stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "stop", "TASK-002", "--reason", "discovered missing configuration dependency"); err != nil {
+		t.Fatalf("stop TASK-002 stderr=%s err=%v", stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "add", "TASK-002", "TASK-003", "--reason", "worker requires configuration"); err != nil {
+		t.Fatalf("add discovered dependency stderr=%s err=%v", stderr, err)
+	}
+	if out, stderr, err := run(t, root, "validate"); err != nil || strings.TrimSpace(out) != "OK" || stderr != "" {
+		t.Fatalf("validate after dependency out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	readyOut, stderr, err = run(t, root, "task", "ready")
+	if err != nil || strings.TrimSpace(readyOut) != "TASK-003" {
+		t.Fatalf("ready after stop/dependency out=%s stderr=%s err=%v", readyOut, stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-003"); err != nil {
+		t.Fatalf("start TASK-003 stderr=%s err=%v", stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "pass", "TASK-003", "--summary", "configuration complete"); err != nil {
+		t.Fatalf("pass TASK-003 stderr=%s err=%v", stderr, err)
+	}
+	readyOut, stderr, err = run(t, root, "task", "ready")
+	if err != nil || strings.TrimSpace(readyOut) != "TASK-002" {
+		t.Fatalf("ready after prerequisite out=%s stderr=%s err=%v", readyOut, stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-002"); err != nil {
+		t.Fatalf("restart TASK-002 stderr=%s err=%v", stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "pass", "TASK-002", "--summary", "worker complete"); err != nil {
+		t.Fatalf("pass TASK-002 stderr=%s err=%v", stderr, err)
+	}
+	readyOut, stderr, err = run(t, root, "task", "ready")
+	if err != nil || strings.TrimSpace(readyOut) != "TASK-004" {
+		t.Fatalf("ready integration out=%s stderr=%s err=%v", readyOut, stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-004"); err != nil {
+		t.Fatalf("start TASK-004 stderr=%s err=%v", stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "pass", "TASK-004", "--summary", "integration complete"); err != nil {
+		t.Fatalf("pass TASK-004 stderr=%s err=%v", stderr, err)
+	}
+
+	passedOut, stderr, err := run(t, root, "task", "list", "--status", "passed")
+	if err != nil {
+		t.Fatalf("list passed out=%s stderr=%s err=%v", passedOut, stderr, err)
+	}
+	for _, want := range []string{"TASK-001\tpassed", "TASK-002\tpassed", "TASK-003\tpassed", "TASK-004\tpassed"} {
+		if !strings.Contains(passedOut, want) {
+			t.Fatalf("passed list missing %q:\n%s", want, passedOut)
+		}
+	}
+	statusJSON, stderr, err := run(t, root, "status", "--json")
+	if err != nil || stderr != "" {
+		t.Fatalf("final status json out=%s stderr=%s err=%v", statusJSON, stderr, err)
+	}
+	var statusEnv struct {
+		SchemaVersion string `json:"schemaVersion"`
+		OK            bool   `json:"ok"`
+		Data          struct {
+			Summary struct {
+				Running []string `json:"running"`
+				Ready   []string `json:"ready"`
+				Blocked []string `json:"blocked"`
+				Failed  []string `json:"failed"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(statusJSON), &statusEnv); err != nil {
+		t.Fatalf("invalid final status json %q: %v", statusJSON, err)
+	}
+	if statusEnv.SchemaVersion != "relo.output/v1" || !statusEnv.OK || len(statusEnv.Data.Summary.Running) != 0 || len(statusEnv.Data.Summary.Ready) != 0 || len(statusEnv.Data.Summary.Blocked) != 0 || len(statusEnv.Data.Summary.Failed) != 0 {
+		t.Fatalf("unexpected final status json: %#v stdout=%s", statusEnv, statusJSON)
+	}
+	missingOut, stderr, err := run(t, root, "task", "get", "TASK-999", "--json")
+	if err == nil || exitCode(err) != 2 || stderr != "" || !strings.Contains(missingOut, `"schemaVersion":"relo.output/v1"`) || !strings.Contains(missingOut, `"ok":false`) {
+		t.Fatalf("json error contract out=%s stderr=%s err=%v", missingOut, stderr, err)
+	}
+}
+
+func TestCLIStatusAndJSONContracts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	for _, name := range []string{"dep", "down", "run", "fail"} {
+		if _, stderr, err := run(t, root, "task", "create", "--title", name, "--objective", "O", "--accept", "A"); err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "add", "TASK-002", "TASK-001", "--reason", "needs"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-003"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-004"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "fail", "TASK-004", "--reason", "bad"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err := run(t, root, "status")
+	if err != nil {
+		t.Fatalf("status failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	for _, want := range []string{"Running: TASK-003", "Ready:   TASK-001", "Blocked: TASK-002", "Failed:  TASK-004"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status missing %q:\n%s", want, out)
+		}
+	}
+	jsonOut, stderr, err := run(t, root, "status", "--json")
+	if err != nil {
+		t.Fatalf("status json failed out=%s stderr=%s err=%v", jsonOut, stderr, err)
+	}
+	var env struct {
+		SchemaVersion string `json:"schemaVersion"`
+		OK            bool   `json:"ok"`
+		Data          struct {
+			Summary struct {
+				Running []string `json:"running"`
+				Ready   []string `json:"ready"`
+				Blocked []string `json:"blocked"`
+				Failed  []string `json:"failed"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &env); err != nil {
+		t.Fatalf("invalid status json %q: %v", jsonOut, err)
+	}
+	if env.SchemaVersion != "relo.output/v1" || !env.OK || strings.Join(env.Data.Summary.Running, ",") != "TASK-003" || strings.Join(env.Data.Summary.Ready, ",") != "TASK-001" || strings.Join(env.Data.Summary.Blocked, ",") != "TASK-002" || strings.Join(env.Data.Summary.Failed, ",") != "TASK-004" {
+		t.Fatalf("unexpected status json: %#v stdout=%s", env, jsonOut)
+	}
+	if env.Data.Summary.Running == nil || env.Data.Summary.Ready == nil || env.Data.Summary.Blocked == nil || env.Data.Summary.Failed == nil {
+		t.Fatalf("status summary has nil arrays: %#v", env.Data.Summary)
+	}
+	getOut, stderr, err := run(t, root, "task", "get", "TASK-001", "--json")
+	if err != nil {
+		t.Fatalf("task get json failed out=%s stderr=%s err=%v", getOut, stderr, err)
+	}
+	var getEnv struct {
+		SchemaVersion string `json:"schemaVersion"`
+		OK            bool   `json:"ok"`
+		Data          struct {
+			Project struct {
+				Goal    string `json:"goal"`
+				PRDPath string `json:"prd_path"`
+			} `json:"project"`
+			Task struct {
+				ID                 string `json:"id"`
+				Title              string `json:"title"`
+				Status             string `json:"status"`
+				Priority           int    `json:"priority"`
+				Objective          string `json:"objective"`
+				AcceptanceCriteria []struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				} `json:"acceptance_criteria"`
+				Dependencies []struct {
+					TaskID       string `json:"task_id"`
+					DependencyID string `json:"dependency_id"`
+					Status       string `json:"status"`
+					Reason       string `json:"reason"`
+					Title        string `json:"title"`
+				} `json:"dependencies"`
+				Notes []struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				} `json:"notes"`
+			} `json:"task"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(getOut), &getEnv); err != nil {
+		t.Fatalf("invalid task get json %q: %v", getOut, err)
+	}
+	if getEnv.SchemaVersion != "relo.output/v1" || !getEnv.OK || getEnv.Data.Project.Goal != "goal" || getEnv.Data.Project.PRDPath != "prd.md" || getEnv.Data.Task.ID != "TASK-001" || getEnv.Data.Task.Title != "dep" || getEnv.Data.Task.Status != "pending" || getEnv.Data.Task.Priority != 100 || getEnv.Data.Task.Objective != "O" {
+		t.Fatalf("unexpected task get json: %#v stdout=%s", getEnv, getOut)
+	}
+	if len(getEnv.Data.Task.AcceptanceCriteria) != 1 || getEnv.Data.Task.AcceptanceCriteria[0].ID != "AC-001" || getEnv.Data.Task.Dependencies == nil || getEnv.Data.Task.Notes == nil {
+		t.Fatalf("task get arrays/ACs not stable: %#v stdout=%s", getEnv.Data.Task, getOut)
+	}
+	depOut, stderr, err := run(t, root, "task", "get", "TASK-002", "--json")
+	if err != nil {
+		t.Fatalf("task get dependency json failed out=%s stderr=%s err=%v", depOut, stderr, err)
+	}
+	getEnv = struct {
+		SchemaVersion string `json:"schemaVersion"`
+		OK            bool   `json:"ok"`
+		Data          struct {
+			Project struct {
+				Goal    string `json:"goal"`
+				PRDPath string `json:"prd_path"`
+			} `json:"project"`
+			Task struct {
+				ID                 string `json:"id"`
+				Title              string `json:"title"`
+				Status             string `json:"status"`
+				Priority           int    `json:"priority"`
+				Objective          string `json:"objective"`
+				AcceptanceCriteria []struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				} `json:"acceptance_criteria"`
+				Dependencies []struct {
+					TaskID       string `json:"task_id"`
+					DependencyID string `json:"dependency_id"`
+					Status       string `json:"status"`
+					Reason       string `json:"reason"`
+					Title        string `json:"title"`
+				} `json:"dependencies"`
+				Notes []struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				} `json:"notes"`
+			} `json:"task"`
+		} `json:"data"`
+	}{}
+	if err := json.Unmarshal([]byte(depOut), &getEnv); err != nil {
+		t.Fatalf("invalid task get dependency json %q: %v", depOut, err)
+	}
+	if len(getEnv.Data.Task.Dependencies) != 1 || getEnv.Data.Task.Dependencies[0].TaskID != "TASK-002" || getEnv.Data.Task.Dependencies[0].DependencyID != "TASK-001" || getEnv.Data.Task.Dependencies[0].Status != "pending" || getEnv.Data.Task.Dependencies[0].Reason != "needs" || getEnv.Data.Task.Dependencies[0].Title != "dep" {
+		t.Fatalf("dependency DTO missing stable fields: %#v stdout=%s", getEnv.Data.Task.Dependencies, depOut)
+	}
+	missingOut, stderr, err := run(t, root, "task", "get", "TASK-999", "--json")
+	if err == nil || exitCode(err) != 2 || stderr != "" {
+		t.Fatalf("missing task succeeded, leaked stderr, or wrong code out=%s stderr=%s err=%v", missingOut, stderr, err)
+	}
+	var errEnv struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(missingOut), &errEnv); err != nil {
+		t.Fatalf("invalid missing task envelope %q: %v", missingOut, err)
+	}
+	if errEnv.OK || errEnv.Error.Code != "NOT_FOUND" {
+		t.Fatalf("unexpected missing task envelope: %#v stdout=%s", errEnv, missingOut)
+	}
+	badReadyOut, stderr, err := run(t, root, "task", "ready", "extra", "--json")
+	if err == nil || exitCode(err) != 2 || stderr != "" {
+		t.Fatalf("ready extra succeeded, leaked stderr, or wrong code out=%s stderr=%s err=%v", badReadyOut, stderr, err)
+	}
+	if err := json.Unmarshal([]byte(badReadyOut), &errEnv); err != nil {
+		t.Fatalf("invalid ready arg envelope %q: %v", badReadyOut, err)
+	}
+	if errEnv.OK || errEnv.Error.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("unexpected ready arg envelope: %#v stdout=%s", errEnv, badReadyOut)
+	}
+	flagOut, stderr, err := run(t, root, "task", "ready", "--json", "--bogus")
+	if err == nil || exitCode(err) != 2 || stderr != "" {
+		t.Fatalf("ready bad flag succeeded, leaked stderr, or wrong code out=%s stderr=%s err=%v", flagOut, stderr, err)
+	}
+	if err := json.Unmarshal([]byte(flagOut), &errEnv); err != nil {
+		t.Fatalf("invalid ready flag envelope %q: %v", flagOut, err)
+	}
+	if errEnv.OK || errEnv.Error.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("unexpected ready flag envelope: %#v stdout=%s", errEnv, flagOut)
+	}
+	falseOut, stderr, err := run(t, root, "task", "ready", "extra", "--json=false")
+	if err == nil || exitCode(err) != 2 || falseOut != "" || !strings.Contains(stderr, "accepts 0 arg") {
+		t.Fatalf("--json=false should be human error only out=%s stderr=%s err=%v", falseOut, stderr, err)
+	}
+}
+
+func TestCLIGraphJSONValidationErrorsAndEmptyShape(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err := run(t, root, "graph", "extra", "--format", "json")
+	if err == nil || exitCode(err) != 2 || stderr != "" {
+		t.Fatalf("graph positional succeeded, leaked stderr, or wrong code out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	var env struct {
+		SchemaVersion string `json:"schemaVersion"`
+		OK            bool   `json:"ok"`
+		Error         struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("invalid json error envelope %q: %v", out, err)
+	}
+	if env.SchemaVersion != "relo.output/v1" || env.OK || env.Error.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("unexpected error envelope: %#v stdout=%s stderr=%s", env, out, stderr)
+	}
+	out, stderr, err = run(t, root, "graph", "--format", "yaml")
+	if err == nil || exitCode(err) != 2 {
+		t.Fatalf("graph invalid format succeeded or wrong code out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if out != "" || !strings.Contains(stderr, "--format must be tree or json") {
+		t.Fatalf("yaml/invalid format should be human stderr only out=%s stderr=%s", out, stderr)
+	}
+	out, stderr, err = run(t, root, "graph", "--format", "json")
+	if err != nil {
+		t.Fatalf("empty graph json failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	var ok struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Nodes   []any `json:"nodes"`
+			Edges   []any `json:"edges"`
+			Summary struct {
+				Running []string `json:"running"`
+				Ready   []string `json:"ready"`
+				Blocked []string `json:"blocked"`
+				Failed  []string `json:"failed"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &ok); err != nil {
+		t.Fatalf("invalid empty graph json %q: %v", out, err)
+	}
+	if !ok.OK || ok.Data.Nodes == nil || ok.Data.Edges == nil || ok.Data.Summary.Running == nil || ok.Data.Summary.Ready == nil || ok.Data.Summary.Blocked == nil || ok.Data.Summary.Failed == nil {
+		t.Fatalf("empty graph has nil/missing arrays: %#v stdout=%s", ok, out)
+	}
+}
+
+func TestCLIJSONUninitializedError(t *testing.T) {
+	root := t.TempDir()
+	out, stderr, err := run(t, root, "task", "ready", "--json")
+	if err == nil || exitCode(err) != 2 || stderr != "" {
+		t.Fatalf("uninitialized json should exit 2 without stderr out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	var env struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("invalid uninitialized envelope %q: %v", out, err)
+	}
+	if env.OK || env.Error.Code != "VALIDATION_ERROR" {
+		t.Fatalf("unexpected uninitialized envelope: %#v stdout=%s", env, out)
 	}
 }
 
@@ -271,6 +847,22 @@ func TestCLITitleAmbiguityAndCreateValidation(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "ambiguous") || !strings.Contains(stderr, "TASK-001") || !strings.Contains(stderr, "TASK-002") {
 		t.Fatalf("unexpected ambiguity stderr: %s", stderr)
+	}
+	out, stderr, err := run(t, root, "task", "get", "--title", "dup", "--json")
+	if err == nil || exitCode(err) != 2 || stderr != "" {
+		t.Fatalf("json ambiguity succeeded, leaked stderr, or wrong code out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	var env struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("invalid ambiguity envelope %q: %v", out, err)
+	}
+	if env.OK || env.Error.Code != "VALIDATION_ERROR" {
+		t.Fatalf("unexpected ambiguity envelope: %#v stdout=%s", env, out)
 	}
 }
 

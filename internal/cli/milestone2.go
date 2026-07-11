@@ -1,14 +1,19 @@
 package cli
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"relo/internal/domain"
 	"relo/internal/store"
 
 	"github.com/spf13/cobra"
 )
+
+var jsonErrorWritten bool
 
 type envelope struct {
 	SchemaVersion string `json:"schemaVersion"`
@@ -19,6 +24,110 @@ type envelope struct {
 
 func okEnvelope(data any) envelope {
 	return envelope{SchemaVersion: "relo.output/v1", OK: true, Data: data}
+}
+
+func errorEnvelope(code, message string) envelope {
+	return envelope{SchemaVersion: "relo.output/v1", OK: false, Error: map[string]any{"code": code, "message": message, "details": map[string]any{}}}
+}
+
+func writeJSONOK(cmd *cobra.Command, data any) error {
+	return json.NewEncoder(cmd.OutOrStdout()).Encode(okEnvelope(data))
+}
+
+func writeJSONError(cmd *cobra.Command, enabled bool, code string, err error) {
+	if !enabled || err == nil {
+		return
+	}
+	if code == "" {
+		code = jsonErrorCode(err)
+	}
+	jsonErrorWritten = true
+	_ = json.NewEncoder(cmd.OutOrStdout()).Encode(errorEnvelope(code, err.Error()))
+}
+
+func jsonErrorCode(err error) string {
+	var ve store.ValidationError
+	if errors.Is(err, sql.ErrNoRows) {
+		return "NOT_FOUND"
+	}
+	if errors.As(err, &ve) {
+		return "VALIDATION_ERROR"
+	}
+	return "OPERATIONAL_ERROR"
+}
+
+type projectDTO struct {
+	Goal    string `json:"goal"`
+	PRDPath string `json:"prd_path"`
+}
+
+type taskDTO struct {
+	ID                 string          `json:"id"`
+	Title              string          `json:"title"`
+	Status             string          `json:"status"`
+	Priority           int             `json:"priority"`
+	Objective          string          `json:"objective"`
+	AcceptanceCriteria []acDTO         `json:"acceptance_criteria"`
+	Dependencies       []dependencyDTO `json:"dependencies"`
+	Notes              []noteDTO       `json:"notes"`
+}
+
+type acDTO struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+type dependencyDTO struct {
+	TaskID       string `json:"task_id"`
+	DependencyID string `json:"dependency_id"`
+	Status       string `json:"status"`
+	Reason       string `json:"reason"`
+	Title        string `json:"title"`
+}
+
+type noteDTO struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+type taskGetDTO struct {
+	Project projectDTO `json:"project"`
+	Task    taskDTO    `json:"task"`
+}
+
+func toTaskDTO(t domain.Task) taskDTO {
+	out := taskDTO{
+		ID:                 t.ID,
+		Title:              t.Title,
+		Status:             t.Status,
+		Priority:           t.Priority,
+		Objective:          t.Objective,
+		AcceptanceCriteria: []acDTO{},
+		Dependencies:       []dependencyDTO{},
+		Notes:              []noteDTO{},
+	}
+	for _, ac := range t.AcceptanceCriteria {
+		out.AcceptanceCriteria = append(out.AcceptanceCriteria, acDTO{ID: ac.ID, Text: ac.Text})
+	}
+	for _, d := range t.Dependencies {
+		out.Dependencies = append(out.Dependencies, dependencyDTO{TaskID: d.TaskID, DependencyID: d.DependencyID, Status: d.Status, Reason: d.Reason, Title: d.Title})
+	}
+	for _, n := range t.Notes {
+		out.Notes = append(out.Notes, noteDTO{ID: n.ID, Text: n.Text})
+	}
+	return out
+}
+
+func toTaskGetDTO(snap store.TaskReadSnapshot) taskGetDTO {
+	return taskGetDTO{Project: projectDTO{Goal: snap.Project.Goal, PRDPath: snap.Project.PRDPath}, Task: toTaskDTO(snap.Task)}
+}
+
+func toTasksDTO(tasks []domain.Task) []taskDTO {
+	out := make([]taskDTO, 0, len(tasks))
+	for _, t := range tasks {
+		out = append(out, toTaskDTO(t))
+	}
+	return out
 }
 
 func (a *app) taskAcceptanceCmd() *cobra.Command {
@@ -212,20 +321,27 @@ func (a *app) taskDependencyReasonCmd() *cobra.Command {
 
 func (a *app) taskReadyCmd() *cobra.Command {
 	var details, jsonOut bool
-	cmd := &cobra.Command{Use: "ready", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "ready", RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			err := store.ValidationError{Message: fmt.Sprintf("accepts 0 arg(s), received %d", len(args))}
+			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
 		defer s.Close()
-		tasks, err := s.ReadyTasks(cmd.Context())
+		snap, err := s.ReadyReadSnapshot(cmd.Context())
 		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
 		if jsonOut {
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(okEnvelope(map[string]any{"tasks": tasks}))
+			return writeJSONOK(cmd, map[string]any{"tasks": toTasksDTO(snap.Tasks)})
 		}
-		for _, t := range tasks {
+		for _, t := range snap.Tasks {
 			if details {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s\tpriority=%d\t%s\n", t.ID, t.Priority, t.Title)
 			} else {
