@@ -126,14 +126,16 @@ func (s *Store) UpdateMilestoneRecommendation(ctx context.Context, milestoneID, 
 		if !domain.CanModifyMilestone(m.Status) {
 			return validation("%s is %s and cannot be modified", milestoneID, m.Status)
 		}
-		res, err := tx.tx.ExecContext(ctx, `UPDATE milestone_recommendations SET text=?,updated_at=? WHERE milestone_id=? AND recommendation_id=?`, text, time.Now().UTC().Format(time.RFC3339Nano), milestoneID, recommendationID)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		res, err := tx.tx.ExecContext(ctx, `UPDATE milestone_recommendations SET text=?,updated_at=? WHERE milestone_id=? AND recommendation_id=?`, text, now, milestoneID, recommendationID)
 		if err != nil {
 			return err
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return sql.ErrNoRows
 		}
-		return nil
+		_, err = tx.tx.ExecContext(ctx, `UPDATE milestones SET updated_at=? WHERE id=?`, now, milestoneID)
+		return err
 	})
 }
 
@@ -153,7 +155,8 @@ func (s *Store) RemoveMilestoneRecommendation(ctx context.Context, milestoneID, 
 		if n, _ := res.RowsAffected(); n == 0 {
 			return sql.ErrNoRows
 		}
-		return nil
+		_, err = tx.tx.ExecContext(ctx, `UPDATE milestones SET updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), milestoneID)
+		return err
 	})
 }
 

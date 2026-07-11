@@ -8,6 +8,48 @@ import (
 	"testing"
 )
 
+func TestMilestoneRecommendationMutationsUpdateParentTimestamp(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	task := createTaskForRuntime(t, ctx, s, "task")
+	id, err := s.CreateMilestone(ctx, "title", "reason", []string{task}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recommendationID, err := s.AddMilestoneRecommendation(ctx, id, "original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldTimestamp = "2000-01-01T00:00:00Z"
+	if _, err := s.db.ExecContext(ctx, `UPDATE milestones SET updated_at=? WHERE id=?`, oldTimestamp, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMilestoneRecommendation(ctx, id, recommendationID, "updated"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := s.MilestoneReadSnapshot(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Milestone.UpdatedAt == oldTimestamp || snapshot.Milestone.UpdatedAt != snapshot.Milestone.Recommendations[0].UpdatedAt {
+		t.Fatalf("update timestamps = milestone %q recommendation %q", snapshot.Milestone.UpdatedAt, snapshot.Milestone.Recommendations[0].UpdatedAt)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE milestones SET updated_at=? WHERE id=?`, oldTimestamp, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveMilestoneRecommendation(ctx, id, recommendationID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = s.MilestoneReadSnapshot(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Milestone.UpdatedAt == oldTimestamp || len(snapshot.Milestone.Recommendations) != 0 {
+		t.Fatalf("remove left timestamp %q and recommendations %#v", snapshot.Milestone.UpdatedAt, snapshot.Milestone.Recommendations)
+	}
+}
+
 func TestMilestoneRecommendationsAreMonotonicAndImmutableAfterMark(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newProject(t)
