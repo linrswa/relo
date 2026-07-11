@@ -32,6 +32,16 @@ func run(t *testing.T, dir string, args ...string) (string, string, error) {
 	return stdout.String(), stderr.String(), err
 }
 
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
 func TestCLIInitRootDiscoveryTaskCRUD(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
@@ -103,10 +113,15 @@ func TestCLICommandPositionalRejection(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	if _, stderr, err := run(t, root, "unknown"); err == nil {
+		t.Fatal("unknown command succeeded")
+	} else if exitCode(err) != 2 || !strings.Contains(stderr, "unknown command") {
+		t.Fatalf("unexpected unknown command err=%v stderr=%s", err, stderr)
+	}
 	if _, stderr, err := run(t, root, "init", "extra", "--prd", "prd.md", "--goal", "goal"); err == nil {
 		t.Fatal("init accepted positional arg")
-	} else if !strings.Contains(stderr, "unknown command") && !strings.Contains(stderr, "accepts 0 arg") {
-		t.Fatalf("unexpected init positional stderr: %s", stderr)
+	} else if exitCode(err) != 2 || (!strings.Contains(stderr, "unknown command") && !strings.Contains(stderr, "accepts 0 arg")) {
+		t.Fatalf("unexpected init positional err=%v stderr=%s", err, stderr)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".relo", "relo.db")); !os.IsNotExist(err) {
 		t.Fatalf("invalid init created db, stat err=%v", err)
@@ -116,8 +131,18 @@ func TestCLICommandPositionalRejection(t *testing.T) {
 	}
 	if _, stderr, err := run(t, root, "task", "list", "extra"); err == nil {
 		t.Fatal("task list accepted positional arg")
-	} else if !strings.Contains(stderr, "unknown command") && !strings.Contains(stderr, "accepts 0 arg") {
-		t.Fatalf("unexpected task list positional stderr: %s", stderr)
+	} else if exitCode(err) != 2 || (!strings.Contains(stderr, "unknown command") && !strings.Contains(stderr, "accepts 0 arg")) {
+		t.Fatalf("unexpected task list positional err=%v stderr=%s", err, stderr)
+	}
+	if _, stderr, err := run(t, root, "task", "start"); err == nil {
+		t.Fatal("task start accepted no IDs")
+	} else if exitCode(err) != 2 || !strings.Contains(stderr, "requires at least 1 arg") {
+		t.Fatalf("unexpected task start positional err=%v stderr=%s", err, stderr)
+	}
+	if _, stderr, err := run(t, root, "task", "list", "--bogus"); err == nil {
+		t.Fatal("task list accepted invalid flag")
+	} else if exitCode(err) != 2 || !strings.Contains(stderr, "unknown flag") {
+		t.Fatalf("unexpected invalid flag err=%v stderr=%s", err, stderr)
 	}
 }
 
@@ -246,5 +271,133 @@ func TestCLITitleAmbiguityAndCreateValidation(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "ambiguous") || !strings.Contains(stderr, "TASK-001") || !strings.Contains(stderr, "TASK-002") {
 		t.Fatalf("unexpected ambiguity stderr: %s", stderr)
+	}
+}
+
+func TestCLIRuntimeCommandsAndReadyGating(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	for _, name := range []string{"dep", "down", "other"} {
+		if _, stderr, err := run(t, root, "task", "create", "--title", name, "--objective", "O", "--accept", "A"); err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "add", "TASK-002", "TASK-001", "--reason", "needs"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err := run(t, root, "task", "start", "TASK-001", "TASK-003")
+	if err != nil {
+		t.Fatalf("start failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(out, "TASK-001") || !strings.Contains(out, "TASK-003") {
+		t.Fatalf("unexpected start output: %s", out)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-002"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "blocked") {
+		t.Fatalf("blocked start err=%v stderr=%s", err, stderr)
+	}
+	if _, stderr, err := run(t, root, "task", "pass", "TASK-001", "--summary", "done"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err = run(t, root, "task", "ready")
+	if err != nil {
+		t.Fatal(stderr, err)
+	}
+	if !strings.Contains(out, "TASK-002") {
+		t.Fatalf("downstream not ready after pass: %s", out)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-002"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "reopen", "TASK-001", "--reason", "redo"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "TASK-002") {
+		t.Fatalf("unsafe reopen err=%v stderr=%s", err, stderr)
+	}
+	if _, stderr, err := run(t, root, "task", "stop", "TASK-002", "TASK-003", "--reason", "pause"); err != nil {
+		t.Fatalf("multi stop stderr=%s err=%v", stderr, err)
+	}
+	out, stderr, err = run(t, root, "task", "list")
+	if err != nil {
+		t.Fatal(stderr, err)
+	}
+	if !strings.Contains(out, "TASK-002\tpending") || !strings.Contains(out, "TASK-003\tpending") {
+		t.Fatalf("stop did not reset tasks: %s", out)
+	}
+	if _, stderr, err := run(t, root, "task", "reopen", "TASK-001", "--reason", "redo"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-001"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "fail", "TASK-001"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "--reason is required") {
+		t.Fatalf("fail without reason err=%v stderr=%s", err, stderr)
+	}
+	if _, stderr, err := run(t, root, "task", "fail", "TASK-001", "--reason", "bad"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "retry", "TASK-001"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err = run(t, root, "task", "list", "--status", "pending")
+	if err != nil || !strings.Contains(out, "TASK-001\tpending") {
+		t.Fatalf("retry list out=%s stderr=%s err=%v", out, stderr, err)
+	}
+}
+
+func TestCLIRuntimeAtomicityAndExitCodes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	for _, name := range []string{"one", "two", "three"} {
+		if _, stderr, err := run(t, root, "task", "create", "--title", name, "--objective", "O", "--accept", "A"); err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "add", "TASK-003", "TASK-002", "--reason", "needs"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-001", "TASK-003"); err == nil || exitCode(err) != 2 {
+		t.Fatalf("mixed start err=%v stderr=%s", err, stderr)
+	}
+	out, stderr, err := run(t, root, "task", "list")
+	if err != nil {
+		t.Fatal(stderr, err)
+	}
+	if !strings.Contains(out, "TASK-001\tpending") || !strings.Contains(out, "TASK-003\tpending") {
+		t.Fatalf("mixed start was not atomic: %s", out)
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-001"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "stop", "TASK-001", "TASK-002", "--reason", "pause"); err == nil || exitCode(err) != 2 {
+		t.Fatalf("mixed stop err=%v stderr=%s", err, stderr)
+	}
+	out, stderr, err = run(t, root, "task", "list")
+	if err != nil {
+		t.Fatal(stderr, err)
+	}
+	if !strings.Contains(out, "TASK-001\trunning") || !strings.Contains(out, "TASK-002\tpending") {
+		t.Fatalf("mixed stop was not atomic: %s", out)
+	}
+	if _, stderr, err := run(t, root, "task", "stop", "TASK-001"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "--reason is required") {
+		t.Fatalf("stop without reason err=%v stderr=%s", err, stderr)
+	}
+	for _, badID := range []string{"bad-id", "TASK-1", "TASK-01", "TASK-ABC"} {
+		if _, stderr, err := run(t, root, "task", "start", badID); err == nil || exitCode(err) != 2 {
+			t.Fatalf("bad id %s err=%v stderr=%s", badID, err, stderr)
+		}
+	}
+	if _, stderr, err := run(t, root, "task", "start", "TASK-1000"); err == nil || exitCode(err) != 2 || strings.Contains(stderr, "canonical") {
+		t.Fatalf("TASK-1000 should pass canonical validation and fail as missing task, err=%v stderr=%s", err, stderr)
+	}
+	if _, _, err := run(t, root, "task", "create", "--title", "bad", "--objective-file", "missing.txt", "--accept", "A"); err == nil || exitCode(err) != 1 {
+		t.Fatalf("unexpected runtime failure exit: %v", err)
 	}
 }

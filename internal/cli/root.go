@@ -19,6 +19,10 @@ type app struct{}
 func Execute() int {
 	a := &app{}
 	cmd := a.rootCmd()
+	if _, _, err := cmd.Find(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		var ve store.ValidationError
@@ -32,8 +36,40 @@ func Execute() int {
 
 func (a *app) rootCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "relo", SilenceUsage: true, SilenceErrors: true}
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return store.ValidationError{Message: err.Error()}
+	})
 	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.validateCmd())
 	return cmd
+}
+
+func validationArgs(fn cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := fn(cmd, args); err != nil {
+			return store.ValidationError{Message: err.Error()}
+		}
+		return nil
+	}
+}
+
+func requireCanonicalTaskID(id string) error {
+	if !isCanonicalTaskID(id) {
+		return store.ValidationError{Message: "mutation commands require canonical task ID"}
+	}
+	return nil
+}
+
+func isCanonicalTaskID(id string) bool {
+	const prefix = "TASK-"
+	if !strings.HasPrefix(id, prefix) || len(id) < len(prefix)+3 {
+		return false
+	}
+	for _, r := range id[len(prefix):] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *app) open(ctx context.Context) (*store.Store, error) {
@@ -54,7 +90,7 @@ func (a *app) open(ctx context.Context) (*store.Store, error) {
 
 func (a *app) initCmd() *cobra.Command {
 	var prd, goal string
-	cmd := &cobra.Command{Use: "init", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "init", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := store.InitProject(cmd.Context(), ".", prd, goal)
 		if err != nil {
 			return err
@@ -69,7 +105,7 @@ func (a *app) initCmd() *cobra.Command {
 
 func (a *app) projectCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "project"}
-	cmd.AddCommand(&cobra.Command{Use: "show", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd.AddCommand(&cobra.Command{Use: "show", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -87,7 +123,7 @@ func (a *app) projectCmd() *cobra.Command {
 
 func (a *app) taskCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "task"}
-	cmd.AddCommand(a.taskCreateCmd(), a.taskGetCmd(), a.taskListCmd(), a.taskUpdateCmd(), a.taskDeleteCmd(), a.taskAcceptanceCmd(), a.taskNoteCmd(), a.taskDependencyCmd(), a.taskReadyCmd())
+	cmd.AddCommand(a.taskCreateCmd(), a.taskGetCmd(), a.taskListCmd(), a.taskUpdateCmd(), a.taskDeleteCmd(), a.taskAcceptanceCmd(), a.taskNoteCmd(), a.taskDependencyCmd(), a.taskReadyCmd(), a.taskStartCmd(), a.taskStopCmd(), a.taskPassCmd(), a.taskFailCmd(), a.taskRetryCmd(), a.taskReopenCmd())
 	return cmd
 }
 
@@ -95,7 +131,7 @@ func (a *app) taskCreateCmd() *cobra.Command {
 	var title, objective, objectiveFile string
 	var accepts []string
 	var priority int
-	cmd := &cobra.Command{Use: "create", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "create", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		if objectiveFile != "" {
 			b, err := os.ReadFile(objectiveFile)
 			if err != nil {
@@ -162,7 +198,7 @@ func (a *app) taskGetCmd() *cobra.Command {
 
 func (a *app) taskListCmd() *cobra.Command {
 	var status string
-	cmd := &cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "list", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -184,9 +220,9 @@ func (a *app) taskListCmd() *cobra.Command {
 func (a *app) taskUpdateCmd() *cobra.Command {
 	var title, objective, objectiveFile, reason string
 	var priority int
-	cmd := &cobra.Command{Use: "update TASK-ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if !strings.HasPrefix(args[0], "TASK-") {
-			return store.ValidationError{Message: "mutation commands require canonical task ID"}
+	cmd := &cobra.Command{Use: "update TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskID(args[0]); err != nil {
+			return err
 		}
 		var tp, op *string
 		var pp *int
@@ -222,9 +258,9 @@ func (a *app) taskUpdateCmd() *cobra.Command {
 }
 
 func (a *app) taskDeleteCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "delete TASK-ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if !strings.HasPrefix(args[0], "TASK-") {
-			return store.ValidationError{Message: "delete requires canonical task ID"}
+	cmd := &cobra.Command{Use: "delete TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskID(args[0]); err != nil {
+			return err
 		}
 		s, err := a.open(cmd.Context())
 		if err != nil {

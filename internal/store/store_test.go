@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -23,6 +24,24 @@ func newProject(t *testing.T) (*Store, string) {
 		t.Fatal(err)
 	}
 	return s, root
+}
+
+func createTaskForRuntime(t *testing.T, ctx context.Context, s *Store, title string) string {
+	t.Helper()
+	id, err := s.CreateTask(ctx, title, "objective", []string{"ac"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func taskStatus(t *testing.T, ctx context.Context, s *Store, id string) string {
+	t.Helper()
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task.Status
 }
 
 func TestInitProjectMigrateAndRepeatGuard(t *testing.T) {
@@ -446,6 +465,323 @@ func TestForeignKeyAndDownstreamDeleteRestriction(t *testing.T) {
 		var ve ValidationError
 		if !errors.As(err, &ve) {
 			t.Fatalf("err type = %T, want ValidationError", err)
+		}
+	}
+}
+
+func TestStartTaskIncrementsAttemptAndCreatesRunningAttempt(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	id := createTaskForRuntime(t, ctx, s, "start")
+	started, err := s.StartTasks(ctx, []string{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(started) != 1 || started[0] != id {
+		t.Fatalf("started = %#v", started)
+	}
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != "running" || task.AttemptCount != 1 {
+		t.Fatalf("task status/count = %s/%d", task.Status, task.AttemptCount)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM attempts WHERE task_id=? AND attempt_number=1 AND status='running' AND completed_at IS NULL`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("running attempts = %d, want 1", n)
+	}
+}
+
+func TestPassFailStopRequireOpenAttemptAndCloseItAtomically(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	passID := createTaskForRuntime(t, ctx, s, "pass")
+	if _, err := s.StartTasks(ctx, []string{passID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PassTask(ctx, passID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	var closed, withSummary int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), SUM(CASE WHEN summary='done' THEN 1 ELSE 0 END) FROM attempts WHERE task_id=? AND status='passed' AND completed_at IS NOT NULL`, passID).Scan(&closed, &withSummary); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus(t, ctx, s, passID) != "passed" || closed != 1 || withSummary != 1 {
+		t.Fatalf("pass did not close attempt")
+	}
+	failID := createTaskForRuntime(t, ctx, s, "fail")
+	if _, err := s.StartTasks(ctx, []string{failID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailTask(ctx, failID, ""); err == nil {
+		t.Fatal("fail without reason succeeded")
+	}
+	if err := s.FailTask(ctx, failID, "bad"); err != nil {
+		t.Fatal(err)
+	}
+	var failedWithReason int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM attempts WHERE task_id=? AND status='failed' AND reason='bad'`, failID).Scan(&failedWithReason); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus(t, ctx, s, failID) != "failed" || failedWithReason != 1 {
+		t.Fatalf("fail status/reason = %s/%d", taskStatus(t, ctx, s, failID), failedWithReason)
+	}
+	stopID := createTaskForRuntime(t, ctx, s, "stop")
+	if _, err := s.StartTasks(ctx, []string{stopID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StopTasks(ctx, []string{stopID}, "pause"); err != nil {
+		t.Fatal(err)
+	}
+	var stoppedEvents int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='stopped' AND reason='pause'`, stopID).Scan(&stoppedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus(t, ctx, s, stopID) != "pending" || stoppedEvents != 1 {
+		t.Fatalf("stop status/events = %s/%d", taskStatus(t, ctx, s, stopID), stoppedEvents)
+	}
+	if err := s.PassTask(ctx, stopID, "no open"); err == nil {
+		t.Fatal("pass without open attempt succeeded")
+	}
+}
+
+func TestMissingRuntimeTaskIDsReturnValidationErrors(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+
+	cases := map[string]func() error{
+		"pass":   func() error { return s.PassTask(ctx, "TASK-999", "done") },
+		"fail":   func() error { return s.FailTask(ctx, "TASK-999", "bad") },
+		"retry":  func() error { return s.RetryTask(ctx, "TASK-999") },
+		"reopen": func() error { return s.ReopenTask(ctx, "TASK-999", "redo") },
+	}
+	for name, fn := range cases {
+		err := fn()
+		var ve ValidationError
+		if !errors.As(err, &ve) || !strings.Contains(err.Error(), "task TASK-999 does not exist") {
+			t.Fatalf("%s err = %T %v, want missing task ValidationError", name, err, err)
+		}
+	}
+}
+
+func TestStopRequiresReason(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	id := createTaskForRuntime(t, ctx, s, "stop reason")
+	if _, err := s.StartTasks(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StopTasks(ctx, []string{id}, ""); err == nil {
+		t.Fatal("stop without reason succeeded")
+	}
+	if taskStatus(t, ctx, s, id) != "running" {
+		t.Fatal("stop without reason mutated task")
+	}
+}
+
+func TestRetryResetsFailedToPending(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	id := createTaskForRuntime(t, ctx, s, "retry")
+	if err := s.RetryTask(ctx, id); err == nil {
+		t.Fatal("retry pending succeeded")
+	}
+	if _, err := s.StartTasks(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailTask(ctx, id, "bad"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RetryTask(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus(t, ctx, s, id) != "pending" {
+		t.Fatalf("retry status = %s", taskStatus(t, ctx, s, id))
+	}
+}
+
+func TestReopenRejectsRunningOrPassedDownstream(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	dep := createTaskForRuntime(t, ctx, s, "dep")
+	down := createTaskForRuntime(t, ctx, s, "down")
+	if err := s.AddDependencies(ctx, down, []string{dep}, "needs", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartTasks(ctx, []string{dep}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PassTask(ctx, dep, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartTasks(ctx, []string{down}); err != nil {
+		t.Fatal(err)
+	}
+	err := s.ReopenTask(ctx, dep, "redo")
+	if err == nil || !strings.Contains(err.Error(), down) {
+		t.Fatalf("reopen err = %v, want affected downstream", err)
+	}
+	if taskStatus(t, ctx, s, dep) != "passed" {
+		t.Fatal("blocked reopen mutated dependency")
+	}
+}
+
+func TestReopenAllowsPendingDownstream(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	dep := createTaskForRuntime(t, ctx, s, "dep")
+	down := createTaskForRuntime(t, ctx, s, "down")
+	if err := s.AddDependencies(ctx, down, []string{dep}, "needs", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartTasks(ctx, []string{dep}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PassTask(ctx, dep, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReopenTask(ctx, dep, "redo"); err != nil {
+		t.Fatal(err)
+	}
+	var reopenedEvents int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='reopened' AND reason='redo'`, dep).Scan(&reopenedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if reopenedEvents != 1 {
+		t.Fatalf("reopened events = %d, want 1", reopenedEvents)
+	}
+	if taskStatus(t, ctx, s, dep) != "pending" || taskStatus(t, ctx, s, down) != "pending" {
+		t.Fatalf("unexpected statuses")
+	}
+}
+
+func TestMultiStartAllOrNothing(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	ready := createTaskForRuntime(t, ctx, s, "ready")
+	dep := createTaskForRuntime(t, ctx, s, "dep")
+	blocked := createTaskForRuntime(t, ctx, s, "blocked")
+	if err := s.AddDependencies(ctx, blocked, []string{dep}, "needs", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartTasks(ctx, []string{ready, blocked}); err == nil {
+		t.Fatal("mixed start succeeded")
+	}
+	if taskStatus(t, ctx, s, ready) != "pending" || taskStatus(t, ctx, s, blocked) != "pending" {
+		t.Fatal("multi-start was not atomic")
+	}
+	started, err := s.StartTasks(ctx, []string{ready, ready})
+	if err != nil || len(started) != 1 {
+		t.Fatalf("dedup start = %#v, %v", started, err)
+	}
+}
+
+func TestMultiStopAllOrNothing(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	a := createTaskForRuntime(t, ctx, s, "a")
+	b := createTaskForRuntime(t, ctx, s, "b")
+	if _, err := s.StartTasks(ctx, []string{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StopTasks(ctx, []string{a, b}, "pause"); err == nil {
+		t.Fatal("mixed stop succeeded")
+	}
+	if taskStatus(t, ctx, s, a) != "running" || taskStatus(t, ctx, s, b) != "pending" {
+		t.Fatal("multi-stop was not atomic")
+	}
+}
+
+func TestConcurrentStartsDoNotCreateDuplicateRunningAttempt(t *testing.T) {
+	ctx := context.Background()
+	s, root := newProject(t)
+	defer s.Close()
+	id := createTaskForRuntime(t, ctx, s, "race")
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ss, err := Open(DBPath(root))
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer ss.Close()
+			_, err = ss.StartTasks(ctx, []string{id})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful starts = %d, want 1", successes)
+	}
+	var running int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM attempts WHERE task_id=? AND status='running'`, id).Scan(&running); err != nil {
+		t.Fatal(err)
+	}
+	if running != 1 {
+		t.Fatalf("running attempts = %d, want 1", running)
+	}
+}
+
+func TestOneOpenAttemptInvariantOnPassFailStopCorruption(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	missing := createTaskForRuntime(t, ctx, s, "missing open")
+	if _, err := s.db.ExecContext(ctx, `UPDATE tasks SET status='running' WHERE id=?`, missing); err != nil {
+		t.Fatal(err)
+	}
+	for name, fn := range map[string]func() error{
+		"pass": func() error { return s.PassTask(ctx, missing, "done") },
+		"fail": func() error { return s.FailTask(ctx, missing, "bad") },
+		"stop": func() error { return s.StopTasks(ctx, []string{missing}, "pause") },
+	} {
+		if err := fn(); err == nil {
+			t.Fatalf("%s with no open attempt succeeded", name)
+		}
+	}
+
+	id := createTaskForRuntime(t, ctx, s, "corrupt")
+	if _, err := s.StartTasks(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP INDEX one_running_attempt_per_task`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO attempts(task_id,attempt_number,status,started_at) VALUES(?,2,'running','now')`, id); err != nil {
+		t.Fatal(err)
+	}
+	for name, fn := range map[string]func() error{
+		"pass": func() error { return s.PassTask(ctx, id, "done") },
+		"fail": func() error { return s.FailTask(ctx, id, "bad") },
+		"stop": func() error { return s.StopTasks(ctx, []string{id}, "pause") },
+	} {
+		if err := fn(); err == nil {
+			t.Fatalf("%s with two open attempts succeeded", name)
 		}
 	}
 }

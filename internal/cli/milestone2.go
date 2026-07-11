@@ -28,7 +28,10 @@ func (a *app) taskAcceptanceCmd() *cobra.Command {
 }
 func (a *app) taskAcceptanceAddCmd() *cobra.Command {
 	var text string
-	cmd := &cobra.Command{Use: "add TASK-ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "add TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -46,7 +49,10 @@ func (a *app) taskAcceptanceAddCmd() *cobra.Command {
 }
 func (a *app) taskAcceptanceUpdateCmd() *cobra.Command {
 	var text string
-	cmd := &cobra.Command{Use: "update TASK-ID AC-ID", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "update TASK-ID AC-ID", Args: validationArgs(cobra.ExactArgs(2)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskID(args[0]); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -58,7 +64,10 @@ func (a *app) taskAcceptanceUpdateCmd() *cobra.Command {
 	return cmd
 }
 func (a *app) taskAcceptanceRemoveCmd() *cobra.Command {
-	return &cobra.Command{Use: "remove TASK-ID AC-ID", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "remove TASK-ID AC-ID", Args: validationArgs(cobra.ExactArgs(2)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskID(args[0]); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -75,7 +84,10 @@ func (a *app) taskNoteCmd() *cobra.Command {
 }
 func (a *app) taskNoteAddCmd() *cobra.Command {
 	var text string
-	cmd := &cobra.Command{Use: "add TASK-ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "add TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -93,7 +105,10 @@ func (a *app) taskNoteAddCmd() *cobra.Command {
 }
 func (a *app) taskNoteUpdateCmd() *cobra.Command {
 	var text string
-	cmd := &cobra.Command{Use: "update TASK-ID NOTE-ID", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "update TASK-ID NOTE-ID", Args: validationArgs(cobra.ExactArgs(2)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskID(args[0]); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -105,7 +120,10 @@ func (a *app) taskNoteUpdateCmd() *cobra.Command {
 	return cmd
 }
 func (a *app) taskNoteRemoveCmd() *cobra.Command {
-	return &cobra.Command{Use: "remove TASK-ID NOTE-ID", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "remove TASK-ID NOTE-ID", Args: validationArgs(cobra.ExactArgs(2)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskID(args[0]); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -130,6 +148,9 @@ func parseReasonFor(vals []string) (map[string]string, error) {
 		if _, ok := out[parts[0]]; ok {
 			return nil, store.ValidationError{Message: "duplicate --reason-for " + parts[0]}
 		}
+		if err := requireCanonicalTaskID(parts[0]); err != nil {
+			return nil, err
+		}
 		out[parts[0]] = parts[1]
 	}
 	return out, nil
@@ -137,7 +158,10 @@ func parseReasonFor(vals []string) (map[string]string, error) {
 func (a *app) taskDependencyAddCmd() *cobra.Command {
 	var reason string
 	var reasonForVals []string
-	cmd := &cobra.Command{Use: "add TASK-ID DEP-ID...", Args: cobra.MinimumNArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "add TASK-ID DEP-ID...", Args: validationArgs(cobra.MinimumNArgs(2)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
 		reasonFor, err := parseReasonFor(reasonForVals)
 		if err != nil {
 			return err
@@ -155,7 +179,10 @@ func (a *app) taskDependencyAddCmd() *cobra.Command {
 }
 func (a *app) taskDependencyRemoveCmd() *cobra.Command {
 	var reason string
-	cmd := &cobra.Command{Use: "remove TASK-ID DEP-ID...", Args: cobra.MinimumNArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "remove TASK-ID DEP-ID...", Args: validationArgs(cobra.MinimumNArgs(2)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -168,7 +195,10 @@ func (a *app) taskDependencyRemoveCmd() *cobra.Command {
 }
 func (a *app) taskDependencyReasonCmd() *cobra.Command {
 	var text string
-	cmd := &cobra.Command{Use: "reason TASK-ID DEP-ID", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "reason TASK-ID DEP-ID", Args: validationArgs(cobra.ExactArgs(2)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -182,7 +212,7 @@ func (a *app) taskDependencyReasonCmd() *cobra.Command {
 
 func (a *app) taskReadyCmd() *cobra.Command {
 	var details, jsonOut bool
-	cmd := &cobra.Command{Use: "ready", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "ready", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -209,8 +239,120 @@ func (a *app) taskReadyCmd() *cobra.Command {
 	return cmd
 }
 
+func (a *app) taskStartCmd() *cobra.Command {
+	return &cobra.Command{Use: "start TASK-ID...", Args: validationArgs(cobra.MinimumNArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		started, err := s.StartTasks(cmd.Context(), args)
+		if err != nil {
+			return err
+		}
+		for _, id := range started {
+			fmt.Fprintln(cmd.OutOrStdout(), id)
+		}
+		return nil
+	}}
+}
+
+func (a *app) taskStopCmd() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{Use: "stop TASK-ID...", Args: validationArgs(cobra.MinimumNArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return s.StopTasks(cmd.Context(), args, reason)
+	}}
+	cmd.Flags().StringVar(&reason, "reason", "", "")
+	return cmd
+}
+
+func (a *app) taskPassCmd() *cobra.Command {
+	var summary string
+	cmd := &cobra.Command{Use: "pass TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return s.PassTask(cmd.Context(), args[0], summary)
+	}}
+	cmd.Flags().StringVar(&summary, "summary", "", "")
+	return cmd
+}
+
+func (a *app) taskFailCmd() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{Use: "fail TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return s.FailTask(cmd.Context(), args[0], reason)
+	}}
+	cmd.Flags().StringVar(&reason, "reason", "", "")
+	return cmd
+}
+
+func (a *app) taskRetryCmd() *cobra.Command {
+	return &cobra.Command{Use: "retry TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return s.RetryTask(cmd.Context(), args[0])
+	}}
+}
+
+func (a *app) taskReopenCmd() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{Use: "reopen TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireCanonicalTaskIDs(args); err != nil {
+			return err
+		}
+		s, err := a.open(cmd.Context())
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return s.ReopenTask(cmd.Context(), args[0], reason)
+	}}
+	cmd.Flags().StringVar(&reason, "reason", "", "")
+	return cmd
+}
+
+func requireCanonicalTaskIDs(ids []string) error {
+	for _, id := range ids {
+		if err := requireCanonicalTaskID(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *app) validateCmd() *cobra.Command {
-	return &cobra.Command{Use: "validate", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "validate", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
