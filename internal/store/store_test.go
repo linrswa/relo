@@ -89,8 +89,15 @@ func TestInitProjectMigrateAndRepeatGuard(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
-		t.Fatalf("user_version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("user_version = %d, want 2", version)
+	}
+	p, err := s.Project(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.NextMilestoneSequence != 1 {
+		t.Fatalf("next milestone sequence = %d, want 1", p.NextMilestoneSequence)
 	}
 	var wal string
 	if err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&wal); err != nil {
@@ -194,6 +201,197 @@ func TestRefreshPRDHashChangedAndUnchanged(t *testing.T) {
 	}
 }
 
+func TestMigrateV1PreservesDataAndV2IsNoOp(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".relo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(DBPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.db.ExecContext(ctx, schemaV1+`
+		INSERT INTO projects(id,goal,prd_path,prd_hash,next_task_sequence,created_at,updated_at) VALUES(1,'goal','prd.md','hash',3,'project-created','project-updated');
+		INSERT INTO tasks(id,title,objective,priority,creation_order,status,attempt_count,last_failure_reason,last_completion_summary,created_at,updated_at) VALUES('TASK-001','title','objective',7,1,'passed',1,'old failure','completed','task-created','task-updated');
+		INSERT INTO tasks(id,title,objective,priority,creation_order,status,created_at,updated_at) VALUES('TASK-002','dependency','dependency objective',8,2,'pending','dependency-created','dependency-updated');
+		INSERT INTO acceptance_criteria(task_id,criterion_id,text,position) VALUES('TASK-001','AC-001','first criterion',0),('TASK-001','AC-002','second criterion',1);
+		INSERT INTO notes(task_id,note_id,text,position) VALUES('TASK-001','NOTE-001','a note',0);
+		INSERT INTO dependencies(task_id,dependency_id,reason,created_at) VALUES('TASK-001','TASK-002','needed','dependency-created');
+		INSERT INTO attempts(task_id,attempt_number,status,started_at,completed_at,summary,reason) VALUES('TASK-001',1,'passed','attempt-started','attempt-completed','done','attempt reason');
+		INSERT INTO dependency_events(task_id,dependency_id,action,reason,created_at) VALUES('TASK-001','TASK-002','added','needed','dependency-event-created');
+		INSERT INTO task_events(task_id,event_type,reason,created_at) VALUES('TASK-001','reopened','task reason','task-event-created');
+		PRAGMA user_version=1;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.Project(ctx)
+	if err != nil || p.Goal != "goal" || p.PRDPath != "prd.md" || p.PRDHash != "hash" || p.NextTaskSequence != 3 || p.NextMilestoneSequence != 1 || p.CreatedAt != "project-created" || p.UpdatedAt != "project-updated" {
+		t.Fatalf("migrated project = %#v, err=%v", p, err)
+	}
+	var title, objective, status, failure, summary, created, updated string
+	var priority, order, attempts int
+	if err := s.db.QueryRowContext(ctx, `SELECT title,objective,priority,creation_order,status,attempt_count,last_failure_reason,last_completion_summary,created_at,updated_at FROM tasks WHERE id='TASK-001'`).Scan(&title, &objective, &priority, &order, &status, &attempts, &failure, &summary, &created, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if title != "title" || objective != "objective" || priority != 7 || order != 1 || status != "passed" || attempts != 1 || failure != "old failure" || summary != "completed" || created != "task-created" || updated != "task-updated" {
+		t.Fatalf("migrated task fields were not preserved")
+	}
+	var attemptNumber int
+	var attemptStatus, started, completed, attemptSummary, reason string
+	if err := s.db.QueryRowContext(ctx, `SELECT attempt_number,status,started_at,completed_at,summary,reason FROM attempts WHERE task_id='TASK-001'`).Scan(&attemptNumber, &attemptStatus, &started, &completed, &attemptSummary, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if attemptNumber != 1 || attemptStatus != "passed" || started != "attempt-started" || completed != "attempt-completed" || attemptSummary != "done" || reason != "attempt reason" {
+		t.Fatalf("migrated attempt fields were not preserved")
+	}
+	var criteria, note, dependency, dependencyEvent, taskEvent string
+	if err := s.db.QueryRowContext(ctx, `SELECT group_concat(criterion_id || ':' || text || ':' || position, '|') FROM (SELECT * FROM acceptance_criteria WHERE task_id='TASK-001' ORDER BY position)`).Scan(&criteria); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT note_id || ':' || text || ':' || position FROM notes WHERE task_id='TASK-001'`).Scan(&note); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT dependency_id || ':' || reason || ':' || created_at FROM dependencies WHERE task_id='TASK-001'`).Scan(&dependency); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT dependency_id || ':' || action || ':' || reason || ':' || created_at FROM dependency_events WHERE task_id='TASK-001'`).Scan(&dependencyEvent); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT event_type || ':' || reason || ':' || created_at FROM task_events WHERE task_id='TASK-001'`).Scan(&taskEvent); err != nil {
+		t.Fatal(err)
+	}
+	if criteria != "AC-001:first criterion:0|AC-002:second criterion:1" || note != "NOTE-001:a note:0" || dependency != "TASK-002:needed:dependency-created" || dependencyEvent != "TASK-002:added:needed:dependency-event-created" || taskEvent != "reopened:task reason:task-event-created" {
+		t.Fatalf("migration lost related values: criteria=%q note=%q dependency=%q dependency event=%q task event=%q", criteria, note, dependency, dependencyEvent, taskEvent)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("v2 migration was not a no-op: %v", err)
+	}
+}
+
+func TestMigrateV2FailureRollsBackSchemaAndVersion(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".relo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(DBPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.db.ExecContext(ctx, schemaV1+`
+		INSERT INTO projects(id,goal,prd_path,prd_hash,next_task_sequence,created_at,updated_at) VALUES(1,'goal','prd','hash',1,'now','now');
+		CREATE TABLE milestones (poison INTEGER);
+		PRAGMA user_version=1;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err == nil {
+		t.Fatal("migration with conflicting v2 DDL succeeded")
+	}
+	var version, milestoneColumn, v2Tables int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='next_milestone_sequence'`).Scan(&milestoneColumn); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('milestone_anchors','milestone_recommendations','milestone_snapshots')`).Scan(&v2Tables); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 || milestoneColumn != 0 || v2Tables != 0 {
+		t.Fatalf("failed migration was not rolled back: version=%d milestone column=%d v2 tables=%d", version, milestoneColumn, v2Tables)
+	}
+}
+
+func TestMigrationV2SchemaConstraints(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	reject := func(statement string) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx, statement); err == nil {
+			t.Fatalf("constraint allowed: %s", statement)
+		}
+	}
+	for _, statement := range []string{
+		`INSERT INTO projects(id,goal,prd_path,prd_hash,next_task_sequence,next_milestone_sequence,created_at,updated_at) VALUES(2,'g','p','h',1,0,'now','now')`,
+		`INSERT INTO milestones(id,title,reason,status,creation_order,next_recommendation_sequence,created_at,updated_at) VALUES('MILESTONE-001','title','reason','planned',1,0,'now','now')`,
+		`INSERT INTO milestones(id,title,reason,status,creation_order,mark_summary,created_at,updated_at) VALUES('MILESTONE-001','title','reason','planned',1,'summary','now','now')`,
+		`INSERT INTO milestones(id,title,reason,status,creation_order,marked_at,created_at,updated_at) VALUES('MILESTONE-001','title','reason','planned',1,'now','now','now')`,
+		`INSERT INTO milestones(id,title,reason,status,creation_order,marked_at,created_at,updated_at) VALUES('MILESTONE-001','title','reason','marked',1,'now','now','now')`,
+		`INSERT INTO milestones(id,title,reason,status,creation_order,mark_summary,created_at,updated_at) VALUES('MILESTONE-001','title','reason','marked',1,'summary','now','now')`,
+	} {
+		reject(statement)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO milestones(id,title,reason,status,creation_order,created_at,updated_at) VALUES('MILESTONE-001','title','reason','planned',1,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`INSERT INTO milestone_recommendations(milestone_id,recommendation_id,text,position,created_at,updated_at) VALUES('MILESTONE-001','REC-001','',0,'now','now')`,
+		`INSERT INTO milestone_recommendations(milestone_id,recommendation_id,text,position,created_at,updated_at) VALUES('MILESTONE-001','REC-001','text',-1,'now','now')`,
+		`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','task',-1,1,0,1,1,'passed','now','now')`,
+		`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','task',0,0,0,1,1,'passed','now','now')`,
+		`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','task',0,1,-1,1,1,'passed','now','now')`,
+		`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','task',0,1,0,2,1,'passed','now','now')`,
+		`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','task',0,1,0,1,0,'passed','now','now')`,
+		`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','task',0,1,0,1,1,'pending','now','now')`,
+	} {
+		reject(statement)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO milestone_recommendations(milestone_id,recommendation_id,text,position,created_at,updated_at) VALUES('MILESTONE-001','REC-001','text',0,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	reject(`INSERT INTO milestone_recommendations(milestone_id,recommendation_id,text,position,created_at,updated_at) VALUES('MILESTONE-001','REC-001','other',1,'now','now')`)
+	reject(`INSERT INTO milestone_recommendations(milestone_id,recommendation_id,text,position,created_at,updated_at) VALUES('MILESTONE-001','REC-002','other',0,'now','now')`)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','task',0,1,0,1,1,'passed','now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	reject(`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-001','other',0,2,1,0,2,'passed','now','now')`)
+	reject(`INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-002','other',0,2,0,0,2,'passed','now','now')`)
+}
+
+func TestMigrationV2ForeignKeyDeleteSemantics(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	taskID := createTaskForRuntime(t, ctx, s, "anchor")
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO milestones(id,title,reason,status,creation_order,mark_summary,marked_at,created_at,updated_at) VALUES('MILESTONE-001','title','reason','marked',1,'summary','now','now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO milestone_anchors(milestone_id,task_id,created_at) VALUES('MILESTONE-001',?,'now')`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO milestone_recommendations(milestone_id,recommendation_id,text,position,created_at,updated_at) VALUES('MILESTONE-001','REC-001','text',0,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,task_updated_at,captured_at) VALUES('MILESTONE-001','TASK-999','gone task',0,1,0,0,1,'passed','now','now')`); err != nil {
+		t.Fatalf("snapshot task_id unexpectedly has a task FK: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, taskID); err == nil {
+		t.Fatal("anchor task delete was not restricted")
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM milestones WHERE id='MILESTONE-001'`); err == nil {
+		t.Fatal("milestone delete with snapshot was not restricted")
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM milestone_snapshots WHERE milestone_id='MILESTONE-001'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM milestones WHERE id='MILESTONE-001'`); err != nil {
+		t.Fatal(err)
+	}
+	var anchors, recommendations int
+	if err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM milestone_anchors), (SELECT COUNT(*) FROM milestone_recommendations)`).Scan(&anchors, &recommendations); err != nil {
+		t.Fatal(err)
+	}
+	if anchors != 0 || recommendations != 0 {
+		t.Fatalf("milestone delete did not cascade: anchors=%d recommendations=%d", anchors, recommendations)
+	}
+}
+
 func TestMigrateRejectsUnsupportedFutureVersion(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -204,7 +402,7 @@ func TestMigrateRejectsUnsupportedFutureVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(ctx, `PRAGMA user_version=2`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA user_version=3`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "unsupported database schema version") {

@@ -10,12 +10,13 @@ const (
 )
 
 type Project struct {
-	Goal             string
-	PRDPath          string
-	PRDHash          string
-	NextTaskSequence int
-	CreatedAt        string
-	UpdatedAt        string
+	Goal                  string
+	PRDPath               string
+	PRDHash               string
+	NextTaskSequence      int
+	NextMilestoneSequence int
+	CreatedAt             string
+	UpdatedAt             string
 }
 
 type Task struct {

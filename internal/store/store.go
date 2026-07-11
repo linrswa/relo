@@ -24,7 +24,7 @@ type ValidationError struct{ Message string }
 func (e ValidationError) Error() string        { return e.Message }
 func validation(msg string, args ...any) error { return ValidationError{fmt.Sprintf(msg, args...)} }
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 type Store struct {
 	db   *sql.DB
@@ -159,14 +159,25 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if v > currentSchemaVersion {
 			return validation("unsupported database schema version %d (supported %d)", v, currentSchemaVersion)
 		}
-		if v == currentSchemaVersion {
-			return nil
+		for v < currentSchemaVersion {
+			var migration string
+			switch v {
+			case 0:
+				migration = schemaV1
+			case 1:
+				migration = schemaV2
+			default:
+				return validation("unsupported database schema version %d (supported %d)", v, currentSchemaVersion)
+			}
+			if _, err := tx.ExecContext(ctx, migration); err != nil {
+				return err
+			}
+			v++
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version=%d`, v)); err != nil {
+				return err
+			}
 		}
-		if _, err := tx.ExecContext(ctx, schemaV1); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version=%d`, currentSchemaVersion))
-		return err
+		return nil
 	})
 }
 
@@ -179,7 +190,15 @@ CREATE TABLE dependencies (task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE 
 CREATE TABLE attempts (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, attempt_number INTEGER NOT NULL CHECK (attempt_number > 0), status TEXT NOT NULL CHECK (status IN ('running','passed','failed','interrupted')), started_at TEXT NOT NULL, completed_at TEXT, summary TEXT, reason TEXT, UNIQUE (task_id, attempt_number));
 CREATE TABLE dependency_events (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, dependency_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('added','removed','reason_updated')), reason TEXT NOT NULL CHECK (reason <> ''), created_at TEXT NOT NULL);
 CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, event_type TEXT NOT NULL CHECK (event_type IN ('priority_changed','stopped','reopened')), reason TEXT NOT NULL CHECK (reason <> ''), created_at TEXT NOT NULL);
-CREATE UNIQUE INDEX one_running_attempt_per_task ON attempts(task_id) WHERE status = 'running';`
+CREATE UNIQUE INDEX one_running_attempt_per_task ON attempts(task_id) WHERE status = 'running';
+`
+
+const schemaV2 = `
+ALTER TABLE projects ADD COLUMN next_milestone_sequence INTEGER NOT NULL DEFAULT 1 CHECK (next_milestone_sequence > 0);
+CREATE TABLE milestones (id TEXT PRIMARY KEY, title TEXT NOT NULL CHECK (title <> ''), reason TEXT NOT NULL CHECK (reason <> ''), status TEXT NOT NULL CHECK (status IN ('planned','marked')), creation_order INTEGER NOT NULL UNIQUE, next_recommendation_sequence INTEGER NOT NULL DEFAULT 1 CHECK (next_recommendation_sequence > 0), mark_summary TEXT, reference TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, marked_at TEXT, CHECK ((status = 'planned' AND marked_at IS NULL AND mark_summary IS NULL) OR (status = 'marked' AND marked_at IS NOT NULL AND mark_summary IS NOT NULL AND mark_summary <> '')));
+CREATE TABLE milestone_anchors (milestone_id TEXT NOT NULL REFERENCES milestones(id) ON DELETE CASCADE, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT, created_at TEXT NOT NULL, PRIMARY KEY (milestone_id, task_id));
+CREATE TABLE milestone_recommendations (milestone_id TEXT NOT NULL REFERENCES milestones(id) ON DELETE CASCADE, recommendation_id TEXT NOT NULL, text TEXT NOT NULL CHECK (text <> ''), position INTEGER NOT NULL CHECK (position >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (milestone_id, recommendation_id), UNIQUE (milestone_id, position));
+CREATE TABLE milestone_snapshots (milestone_id TEXT NOT NULL REFERENCES milestones(id) ON DELETE RESTRICT, task_id TEXT NOT NULL, task_title TEXT NOT NULL, priority INTEGER NOT NULL CHECK (priority >= 0), creation_order INTEGER NOT NULL CHECK (creation_order > 0), scope_position INTEGER NOT NULL CHECK (scope_position >= 0), is_anchor INTEGER NOT NULL CHECK (is_anchor IN (0,1)), attempt_number INTEGER NOT NULL CHECK (attempt_number > 0), status TEXT NOT NULL CHECK (status = 'passed'), completion_summary TEXT, task_updated_at TEXT NOT NULL, captured_at TEXT NOT NULL, PRIMARY KEY (milestone_id, task_id), UNIQUE (milestone_id, scope_position));`
 
 func (s *Store) WithWriteTx(ctx context.Context, fn func(*Tx) error) error {
 	return s.withImmediateTx(ctx, func(tx *sql.Tx) error { return fn(&Tx{tx: tx}) })
@@ -328,7 +347,7 @@ type queryer interface {
 
 func project(ctx context.Context, q queryer) (*domain.Project, error) {
 	p := &domain.Project{}
-	err := q.QueryRowContext(ctx, `SELECT goal,prd_path,prd_hash,next_task_sequence,created_at,updated_at FROM projects WHERE id=1`).Scan(&p.Goal, &p.PRDPath, &p.PRDHash, &p.NextTaskSequence, &p.CreatedAt, &p.UpdatedAt)
+	err := q.QueryRowContext(ctx, `SELECT goal,prd_path,prd_hash,next_task_sequence,next_milestone_sequence,created_at,updated_at FROM projects WHERE id=1`).Scan(&p.Goal, &p.PRDPath, &p.PRDHash, &p.NextTaskSequence, &p.NextMilestoneSequence, &p.CreatedAt, &p.UpdatedAt)
 	return p, err
 }
 
