@@ -397,17 +397,42 @@ func (s *Store) ListMilestoneReadSnapshots(ctx context.Context, status string) (
 }
 
 func (s *Store) ReadyMilestones(ctx context.Context) ([]MilestoneReadSnapshot, error) {
-	all, err := s.ListMilestoneReadSnapshots(ctx, domain.MilestoneStatusPlanned)
+	var out []MilestoneReadSnapshot
+	err := s.WithReadTx(ctx, func(tx *Tx) error {
+		var err error
+		out, err = readyMilestonesTx(ctx, tx)
+		return err
+	})
+	return out, err
+}
+
+// readyMilestonesTx builds the ready frontier from the caller's database
+// snapshot so aggregate reads never combine independently committed views.
+func readyMilestonesTx(ctx context.Context, tx *Tx) ([]MilestoneReadSnapshot, error) {
+	rows, err := tx.tx.QueryContext(ctx, `SELECT id FROM milestones WHERE status=? ORDER BY creation_order,id`, domain.MilestoneStatusPlanned)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]MilestoneReadSnapshot, 0, len(all))
-	for _, snap := range all {
+	defer rows.Close()
+	out := []MilestoneReadSnapshot{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		m, err := getMilestone(ctx, tx.tx, id)
+		if err != nil {
+			return nil, err
+		}
+		snap := MilestoneReadSnapshot{Milestone: *m}
+		if err := populateMilestoneSnapshot(ctx, tx, &snap); err != nil {
+			return nil, err
+		}
 		if snap.ReadyToMark {
 			out = append(out, snap)
 		}
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func getMilestone(ctx context.Context, q queryer, id string) (*domain.Milestone, error) {

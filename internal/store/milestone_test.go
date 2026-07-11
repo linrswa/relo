@@ -241,6 +241,69 @@ func TestDeleteMilestoneCascadesLiveRowsAndRestartPersists(t *testing.T) {
 	}
 }
 
+func TestValidateReportsEveryMilestonePersistenceInvariant(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	// Rebuild only the milestone tables without constraints so validation can
+	// exercise corruption that the production schema correctly prevents.
+	mustExec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	mustExec(`PRAGMA foreign_keys=OFF`)
+	mustExec(`DROP TABLE milestone_snapshots`)
+	mustExec(`DROP TABLE milestone_recommendations`)
+	mustExec(`DROP TABLE milestone_anchors`)
+	mustExec(`DROP TABLE milestones`)
+	mustExec(`CREATE TABLE milestones (id TEXT,title TEXT,reason TEXT,status TEXT,creation_order INTEGER,next_recommendation_sequence INTEGER,mark_summary TEXT,reference TEXT,created_at TEXT,updated_at TEXT,marked_at TEXT)`)
+	mustExec(`CREATE TABLE milestone_anchors (milestone_id TEXT,task_id TEXT,created_at TEXT)`)
+	mustExec(`CREATE TABLE milestone_recommendations (milestone_id TEXT,recommendation_id TEXT,text TEXT,position INTEGER,created_at TEXT,updated_at TEXT)`)
+	mustExec(`CREATE TABLE milestone_snapshots (milestone_id TEXT,task_id TEXT,task_title TEXT,priority INTEGER,creation_order INTEGER,scope_position INTEGER,is_anchor INTEGER,attempt_number INTEGER,status TEXT,completion_summary TEXT,task_updated_at TEXT,captured_at TEXT)`)
+	// Planned: no anchors, residual snapshots and mark data. Marked: live
+	// anchors, blank mark fields, no snapshot. A second marked row supplies
+	// malformed snapshot structure. Duplicate/missing anchors and all
+	// recommendation invariants are deliberately represented as well.
+	mustExec(`INSERT INTO milestones VALUES('MILESTONE-001','','','planned',1,0,'summary',NULL,'now','now',' ')`)
+	mustExec(`INSERT INTO milestones VALUES('MILESTONE-002','marked','reason','marked',2,1,' ',NULL,'now','now',' ')`)
+	mustExec(`INSERT INTO milestones VALUES('MILESTONE-003','snapshots','reason','marked',3,1,'summary',NULL,'now','now','now')`)
+	mustExec(`INSERT INTO milestones VALUES('MILESTONE-004','broken','reason','other',4,1,NULL,NULL,'now','now',NULL)`)
+	mustExec(`INSERT INTO milestone_anchors VALUES('MILESTONE-002','TASK-404','now')`)
+	mustExec(`INSERT INTO milestone_anchors VALUES('MILESTONE-002','TASK-404','now')`)
+	mustExec(`INSERT INTO milestone_snapshots VALUES('MILESTONE-001','TASK-001','t',1,1,0,1,1,'passed',NULL,'now','now')`)
+	mustExec(`INSERT INTO milestone_snapshots VALUES('MILESTONE-003','TASK-001','t',-1,0,1,2,0,'pending',NULL,'now','now')`)
+	mustExec(`INSERT INTO milestone_snapshots VALUES('MILESTONE-003','TASK-002','t',1,1,1,0,1,'passed',NULL,'now','now')`)
+	mustExec(`INSERT INTO milestone_recommendations VALUES('MILESTONE-001','REC-001',' ',0,'now','now')`)
+	mustExec(`INSERT INTO milestone_recommendations VALUES('MILESTONE-001','REC-001','text',0,'now','now')`)
+	mustExec(`INSERT INTO milestone_recommendations VALUES('MILESTONE-001','bad','text',-1,'now','now')`)
+	// The project sequence has a CHECK constraint in production, so disable it
+	// only while injecting this on-disk corruption.
+	mustExec(`PRAGMA ignore_check_constraints=ON`)
+	mustExec(`UPDATE projects SET next_milestone_sequence=0 WHERE id=1`)
+
+	report, err := s.Validate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errors := strings.Join(report.Errors, "\n")
+	for _, want := range []string{
+		"MILESTONE-001 title is empty", "MILESTONE-001 reason is empty",
+		"planned milestone MILESTONE-001 has no live anchors", "planned milestone MILESTONE-001 has snapshot rows", "planned milestone MILESTONE-001 has mark data",
+		"marked milestone MILESTONE-002 has live anchors", "marked milestone MILESTONE-002 lacks marked timestamp or summary", "marked milestone MILESTONE-002 lacks snapshot or anchor snapshot",
+		"marked milestone MILESTONE-003 lacks snapshot or anchor snapshot",
+		"planned anchor MILESTONE-002 -> TASK-404 references missing task", "planned milestone MILESTONE-002 has duplicate anchor TASK-404",
+		"MILESTONE-003 snapshot scope positions are not contiguous", "MILESTONE-003 snapshot priority or creation order is invalid", "MILESTONE-003 snapshot anchor flag is invalid", "MILESTONE-003 snapshot status or attempt is invalid",
+		"MILESTONE-001 recommendation REC-001 text is empty", "MILESTONE-001 has duplicate recommendation ID REC-001", "MILESTONE-001 recommendation positions are invalid", "MILESTONE-001 has invalid recommendation ID bad",
+		"MILESTONE-001 next recommendation sequence is non-positive", "MILESTONE-004 has invalid status other", "next milestone sequence is invalid",
+	} {
+		if !strings.Contains(errors, want) {
+			t.Errorf("validation errors missing %q:\n%s", want, errors)
+		}
+	}
+}
+
 func TestMilestoneReadsRejectPersistedGraphCorruptionOutsideScope(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newProject(t)

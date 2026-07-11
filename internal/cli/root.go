@@ -18,6 +18,16 @@ import (
 
 type app struct{}
 
+// statusSummaryDTO is deliberately separate from render.JSONSummary: graph
+// JSON is a stable task-DAG contract and must not gain milestone fields.
+type statusSummaryDTO struct {
+	Running               []string `json:"running"`
+	Ready                 []string `json:"ready"`
+	Blocked               []string `json:"blocked"`
+	Failed                []string `json:"failed"`
+	MilestonesReadyToMark []string `json:"milestones_ready_to_mark"`
+}
+
 func Execute() int {
 	jsonErrorWritten = false
 	a := &app{}
@@ -68,7 +78,7 @@ func (a *app) rootCmd() *cobra.Command {
 	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return store.ValidationError{Message: err.Error()}
 	})
-	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.validateCmd(), a.graphCmd(), a.statusCmd())
+	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.milestoneCmd(), a.validateCmd(), a.graphCmd(), a.statusCmd())
 	return cmd
 }
 
@@ -269,20 +279,31 @@ func (a *app) statusCmd() *cobra.Command {
 			return err
 		}
 		defer s.Close()
-		g, err := s.Graph(cmd.Context())
+		snapshot, err := s.StatusReadSnapshot(cmd.Context())
 		if err != nil {
 			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
+		g := snapshot.Graph
 		if c := g.Cycle(); len(c) > 0 {
 			err := store.ValidationError{Message: "dependency graph has cycle: " + strings.Join(c, " -> ")}
 			writeJSONError(cmd, jsonOut, "VALIDATION_ERROR", err)
 			return err
 		}
-		if jsonOut {
-			return writeJSONOK(cmd, map[string]any{"summary": render.Summary(g)})
+		ids := make([]string, 0, len(snapshot.Milestones))
+		for _, milestone := range snapshot.Milestones {
+			ids = append(ids, milestone.Milestone.ID)
 		}
-		fmt.Fprint(cmd.OutOrStdout(), render.Status(g))
+		graphSummary := render.Summary(g)
+		summary := statusSummaryDTO{Running: graphSummary.Running, Ready: graphSummary.Ready, Blocked: graphSummary.Blocked, Failed: graphSummary.Failed, MilestonesReadyToMark: ids}
+		if jsonOut {
+			return writeJSONOK(cmd, map[string]any{"summary": summary})
+		}
+		milestoneText := strings.Join(ids, ", ")
+		if milestoneText == "" {
+			milestoneText = "none"
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s\nMilestones ready to mark: %s\n", render.Status(g), milestoneText)
 		return nil
 	}}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "")
