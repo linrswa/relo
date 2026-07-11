@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,14 +25,11 @@ func run(t *testing.T, dir string, args ...string) (string, string, error) {
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return string(out), string(ee.Stderr), err
-		}
-		return string(out), "", err
-	}
-	return string(out), "", nil
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 func TestCLIInitRootDiscoveryTaskCRUD(t *testing.T) {
@@ -120,6 +118,109 @@ func TestCLICommandPositionalRejection(t *testing.T) {
 		t.Fatal("task list accepted positional arg")
 	} else if !strings.Contains(stderr, "unknown command") && !strings.Contains(stderr, "accepts 0 arg") {
 		t.Fatalf("unexpected task list positional stderr: %s", stderr)
+	}
+}
+
+func TestCLIMilestone2Commands(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	for _, name := range []string{"one", "two", "three"} {
+		if _, stderr, err := run(t, root, "task", "create", "--title", name, "--objective", "O", "--accept", "A"); err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	out, stderr, err := run(t, root, "task", "acceptance", "add", "TASK-001", "--text", "B")
+	if err != nil || strings.TrimSpace(out) != "AC-002" {
+		t.Fatalf("acceptance add out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "note", "add", "TASK-001", "--text", "N"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err = run(t, root, "task", "dependency", "add", "TASK-003", "TASK-001", "TASK-002", "--reason-for", "TASK-001=one", "--reason-for", "TASK-002=two")
+	if err != nil {
+		t.Fatalf("dep add failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if _, _, err := run(t, root, "task", "dependency", "add", "TASK-001", "TASK-003", "--reason", "cycle"); err == nil {
+		t.Fatal("cycle dependency succeeded")
+	}
+	out, stderr, err = run(t, root, "task", "get", "TASK-003")
+	if err != nil {
+		t.Fatal(stderr, err)
+	}
+	if !strings.Contains(out, "TASK-001 (pending): one") || !strings.Contains(out, "TASK-002 (pending): two") || !strings.Contains(out, "## Notes") {
+		t.Fatalf("unexpected get output:\n%s", out)
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "reason", "TASK-003", "TASK-001", "--text", "updated"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	out, stderr, err = run(t, root, "task", "ready", "--json")
+	if err != nil {
+		t.Fatal(stderr, err)
+	}
+	if !strings.Contains(out, `"schemaVersion":"relo.output/v1"`) || !strings.Contains(out, `"ok":true`) || !strings.Contains(out, "TASK-001") || strings.Contains(out, "TASK-003") {
+		t.Fatalf("unexpected ready json: %s", out)
+	}
+	out, stderr, err = run(t, root, "validate")
+	if err != nil {
+		t.Fatalf("validate failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if out != "" || !strings.Contains(stderr, "WARNING: TASK-002 has no notes") {
+		t.Fatalf("expected warning on stderr only, out=%q stderr=%q", out, stderr)
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "remove", "TASK-003", "TASK-001", "TASK-999", "--reason", "bad"); err == nil {
+		t.Fatal("mixed dependency remove succeeded")
+	} else if !strings.Contains(stderr, "dependency task TASK-999 does not exist") {
+		t.Fatalf("unexpected remove stderr: %s", stderr)
+	}
+	out, stderr, err = run(t, root, "task", "get", "TASK-003")
+	if err != nil || !strings.Contains(out, "TASK-001 (pending): updated") || !strings.Contains(out, "TASK-002 (pending): two") {
+		t.Fatalf("remove was not rolled back or get failed out=%s stderr=%s err=%v", out, stderr, err)
+	}
+}
+
+func TestCLIDependencyReasonFlagEdgeCases(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatal(stderr, err)
+	}
+	for _, name := range []string{"one", "two", "three"} {
+		if _, stderr, err := run(t, root, "task", "create", "--title", name, "--objective", "O", "--accept", "A"); err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"missing reason", []string{"task", "dependency", "add", "TASK-003", "TASK-001"}, "--reason or --reason-for is required"},
+		{"mixed reason flags", []string{"task", "dependency", "add", "TASK-003", "TASK-001", "--reason", "all", "--reason-for", "TASK-001=one"}, "--reason and --reason-for are mutually exclusive"},
+		{"unrelated reason", []string{"task", "dependency", "add", "TASK-003", "TASK-001", "--reason-for", "TASK-002=two"}, "unrelated dependency TASK-002"},
+		{"empty reason", []string{"task", "dependency", "add", "TASK-003", "TASK-001", "--reason-for", "TASK-001="}, "reason for TASK-001 must not be empty"},
+		{"bad format", []string{"task", "dependency", "add", "TASK-003", "TASK-001", "--reason-for", "TASK-001"}, "--reason-for must be TASK-ID=TEXT"},
+		{"duplicate reason", []string{"task", "dependency", "add", "TASK-003", "TASK-001", "--reason-for", "TASK-001=one", "--reason-for", "TASK-001=again"}, "duplicate --reason-for TASK-001"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, stderr, err := run(t, root, tc.args...); err == nil {
+				t.Fatal("command succeeded")
+			} else if !strings.Contains(stderr, tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr, tc.want)
+			}
+		})
+	}
+	if _, stderr, err := run(t, root, "task", "dependency", "add", "TASK-003", "TASK-001", "TASK-002", "--reason-for", "TASK-001=one"); err == nil {
+		t.Fatal("missing per-dependency reason succeeded")
+	} else if !strings.Contains(stderr, "missing --reason-for TASK-002") {
+		t.Fatalf("unexpected stderr: %s", stderr)
 	}
 }
 

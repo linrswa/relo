@@ -31,10 +31,17 @@ type Task struct {
 	CreatedAt             string
 	UpdatedAt             string
 	AcceptanceCriteria    []AcceptanceCriterion
+	Notes                 []Note
 	Dependencies          []Dependency
 }
 
 type AcceptanceCriterion struct {
+	ID       string
+	Text     string
+	Position int
+}
+
+type Note struct {
 	ID       string
 	Text     string
 	Position int
@@ -51,6 +58,7 @@ type Dependency struct {
 
 func TaskID(seq int) string { return fmt.Sprintf("TASK-%03d", seq) }
 func ACID(seq int) string   { return fmt.Sprintf("AC-%03d", seq) }
+func NoteID(seq int) string { return fmt.Sprintf("NOTE-%03d", seq) }
 
 func CanModifyDefinition(status string) bool {
 	return status == StatusPending || status == StatusFailed

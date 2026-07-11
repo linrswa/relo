@@ -26,7 +26,10 @@ func validation(msg string, args ...any) error { return ValidationError{fmt.Spri
 
 const currentSchemaVersion = 1
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db   *sql.DB
+	root string
+}
 
 type Tx struct{ tx *sql.Tx }
 
@@ -40,7 +43,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, root: filepath.Dir(filepath.Dir(path))}, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -315,6 +318,21 @@ func getTask(ctx context.Context, q queryer, id string) (*domain.Task, error) {
 			return nil, err
 		}
 		t.AcceptanceCriteria = append(t.AcceptanceCriteria, ac)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows, err = q.QueryContext(ctx, `SELECT note_id,text,position FROM notes WHERE task_id=? ORDER BY position`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n domain.Note
+		if err := rows.Scan(&n.ID, &n.Text, &n.Position); err != nil {
+			return nil, err
+		}
+		t.Notes = append(t.Notes, n)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -32,7 +32,7 @@ func Execute() int {
 
 func (a *app) rootCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "relo", SilenceUsage: true, SilenceErrors: true}
-	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd())
+	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.validateCmd())
 	return cmd
 }
 
@@ -87,7 +87,7 @@ func (a *app) projectCmd() *cobra.Command {
 
 func (a *app) taskCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "task"}
-	cmd.AddCommand(a.taskCreateCmd(), a.taskGetCmd(), a.taskListCmd(), a.taskUpdateCmd(), a.taskDeleteCmd())
+	cmd.AddCommand(a.taskCreateCmd(), a.taskGetCmd(), a.taskListCmd(), a.taskUpdateCmd(), a.taskDeleteCmd(), a.taskAcceptanceCmd(), a.taskNoteCmd(), a.taskDependencyCmd(), a.taskReadyCmd())
 	return cmd
 }
 
@@ -254,6 +254,14 @@ func renderTask(w writer, p *domain.Project, t *domain.Task) {
 	} else {
 		for _, d := range t.Dependencies {
 			fmt.Fprintf(w, "- %s (%s): %s\n", d.DependencyID, d.Status, d.Reason)
+		}
+	}
+	fmt.Fprintln(w, "\n## Notes")
+	if len(t.Notes) == 0 {
+		fmt.Fprintln(w, "None")
+	} else {
+		for _, n := range t.Notes {
+			fmt.Fprintf(w, "- %s %s\n", n.ID, n.Text)
 		}
 	}
 }
