@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"sort"
 	"strings"
 	"time"
@@ -38,8 +39,7 @@ func milestoneIDs(ids []string) error {
 }
 
 // CreateMilestone atomically creates a planned milestone, its anchors, and
-// optional create-time recommendations. Recommendation mutation is otherwise
-// intentionally not part of this task.
+// optional create-time recommendations.
 func (s *Store) CreateMilestone(ctx context.Context, title, reason string, anchors, recommendations []string) (string, error) {
 	if strings.TrimSpace(title) == "" {
 		return "", validation("milestone title must not be empty")
@@ -84,6 +84,77 @@ func (s *Store) CreateMilestone(ctx context.Context, title, reason string, ancho
 		return err
 	})
 	return id, err
+}
+
+func (s *Store) AddMilestoneRecommendation(ctx context.Context, milestoneID, text string) (string, error) {
+	if strings.TrimSpace(text) == "" {
+		return "", validation("recommendation text must not be empty")
+	}
+	var id string
+	err := s.WithWriteTx(ctx, func(tx *Tx) error {
+		m, err := getMilestone(ctx, tx.tx, milestoneID)
+		if err != nil {
+			return err
+		}
+		if !domain.CanModifyMilestone(m.Status) {
+			return validation("%s is %s and cannot be modified", milestoneID, m.Status)
+		}
+		id = domain.RecommendationID(m.NextRecommendationSequence)
+		var position int
+		if err := tx.tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position),-1)+1 FROM milestone_recommendations WHERE milestone_id=?`, milestoneID).Scan(&position); err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO milestone_recommendations(milestone_id,recommendation_id,text,position,created_at,updated_at) VALUES(?,?,?,?,?,?)`, milestoneID, id, text, position, now, now); err != nil {
+			return err
+		}
+		_, err = tx.tx.ExecContext(ctx, `UPDATE milestones SET next_recommendation_sequence=?,updated_at=? WHERE id=?`, m.NextRecommendationSequence+1, now, milestoneID)
+		return err
+	})
+	return id, err
+}
+
+func (s *Store) UpdateMilestoneRecommendation(ctx context.Context, milestoneID, recommendationID, text string) error {
+	if strings.TrimSpace(text) == "" {
+		return validation("recommendation text must not be empty")
+	}
+	return s.WithWriteTx(ctx, func(tx *Tx) error {
+		m, err := getMilestone(ctx, tx.tx, milestoneID)
+		if err != nil {
+			return err
+		}
+		if !domain.CanModifyMilestone(m.Status) {
+			return validation("%s is %s and cannot be modified", milestoneID, m.Status)
+		}
+		res, err := tx.tx.ExecContext(ctx, `UPDATE milestone_recommendations SET text=?,updated_at=? WHERE milestone_id=? AND recommendation_id=?`, text, time.Now().UTC().Format(time.RFC3339Nano), milestoneID, recommendationID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+}
+
+func (s *Store) RemoveMilestoneRecommendation(ctx context.Context, milestoneID, recommendationID string) error {
+	return s.WithWriteTx(ctx, func(tx *Tx) error {
+		m, err := getMilestone(ctx, tx.tx, milestoneID)
+		if err != nil {
+			return err
+		}
+		if !domain.CanModifyMilestone(m.Status) {
+			return validation("%s is %s and cannot be modified", milestoneID, m.Status)
+		}
+		res, err := tx.tx.ExecContext(ctx, `DELETE FROM milestone_recommendations WHERE milestone_id=? AND recommendation_id=?`, milestoneID, recommendationID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
 }
 
 func (s *Store) UpdateMilestone(ctx context.Context, id string, title, reason *string) error {
@@ -204,6 +275,76 @@ func (s *Store) RemoveMilestoneAnchors(ctx context.Context, id string, taskIDs [
 	})
 }
 
+// MarkMilestone captures the current complete passed scope while holding the
+// write lock. It deliberately builds no state before entering the transaction.
+func (s *Store) MarkMilestone(ctx context.Context, id, summary, reference string) error {
+	if strings.TrimSpace(summary) == "" {
+		return validation("mark summary must not be empty")
+	}
+	if strings.TrimSpace(reference) == "" {
+		reference = ""
+	}
+	return s.WithWriteTx(ctx, func(tx *Tx) error {
+		m, err := getMilestone(ctx, tx.tx, id)
+		if err != nil {
+			return err
+		}
+		if !domain.CanModifyMilestone(m.Status) {
+			return validation("%s is %s and cannot be marked", id, m.Status)
+		}
+		g, err := tx.graph(ctx)
+		if err != nil {
+			return err
+		}
+		if err := validateGraphEndpoints(g); err != nil {
+			return err
+		}
+		if cycle := g.Cycle(); len(cycle) > 0 {
+			return validation("dependency graph has cycle: %s", strings.Join(cycle, " -> "))
+		}
+		anchorIDs := make(map[string]bool, len(m.Anchors))
+		for _, anchor := range m.Anchors {
+			anchorIDs[anchor.TaskID] = true
+		}
+		if len(anchorIDs) == 0 {
+			return validation("planned milestone %s has no anchors", id)
+		}
+		scopeIDs, err := milestoneScope(g, anchorIDs)
+		if err != nil {
+			return err
+		}
+		tasks := make([]*domain.Task, 0, len(scopeIDs))
+		for _, taskID := range scopeIDs {
+			t, err := tx.GetTask(ctx, taskID)
+			if err != nil {
+				return err
+			}
+			if t.Status != domain.StatusPassed {
+				return validation("%s is %s and milestone scope must be passed", taskID, t.Status)
+			}
+			if t.AttemptCount <= 0 {
+				return validation("%s is passed but has no current attempt", taskID)
+			}
+			tasks = append(tasks, t)
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		for position, task := range tasks {
+			if _, err := tx.tx.ExecContext(ctx, `INSERT INTO milestone_snapshots(milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,completion_summary,task_updated_at,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, task.ID, task.Title, task.Priority, task.CreationOrder, position, anchorIDs[task.ID], task.AttemptCount, task.Status, task.LastCompletionSummary, task.UpdatedAt, now); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM milestone_anchors WHERE milestone_id=?`, id); err != nil {
+			return err
+		}
+		var ref any
+		if reference != "" {
+			ref = reference
+		}
+		_, err = tx.tx.ExecContext(ctx, `UPDATE milestones SET status='marked',mark_summary=?,reference=?,marked_at=?,updated_at=? WHERE id=?`, summary, ref, now, now, id)
+		return err
+	})
+}
+
 func (s *Store) MilestoneReadSnapshot(ctx context.Context, id string) (MilestoneReadSnapshot, error) {
 	var out MilestoneReadSnapshot
 	err := s.WithReadTx(ctx, func(tx *Tx) error {
@@ -275,17 +416,37 @@ func getMilestone(ctx context.Context, q queryer, id string) (*domain.Milestone,
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.QueryContext(ctx, `SELECT milestone_id,task_id,created_at FROM milestone_anchors WHERE milestone_id=?`, id)
+	// A marked milestone renders solely from its immutable snapshots. In
+	// particular, do not even load live anchors: those rows are transient
+	// planned-state references and must not affect historical reads.
+	if m.Status == domain.MilestoneStatusPlanned {
+		rows, err := q.QueryContext(ctx, `SELECT milestone_id,task_id,created_at FROM milestone_anchors WHERE milestone_id=?`, id)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var a domain.MilestoneAnchor
+			if err := rows.Scan(&a.MilestoneID, &a.TaskID, &a.CreatedAt); err != nil {
+				return nil, err
+			}
+			m.Anchors = append(m.Anchors, a)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := q.QueryContext(ctx, `SELECT milestone_id,task_id,task_title,priority,creation_order,scope_position,is_anchor,attempt_number,status,completion_summary,task_updated_at,captured_at FROM milestone_snapshots WHERE milestone_id=? ORDER BY scope_position`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var a domain.MilestoneAnchor
-		if err := rows.Scan(&a.MilestoneID, &a.TaskID, &a.CreatedAt); err != nil {
+		var snapshot domain.MilestoneSnapshot
+		if err := rows.Scan(&snapshot.MilestoneID, &snapshot.TaskID, &snapshot.TaskTitle, &snapshot.Priority, &snapshot.CreationOrder, &snapshot.ScopePosition, &snapshot.IsAnchor, &snapshot.AttemptNumber, &snapshot.Status, &snapshot.CompletionSummary, &snapshot.TaskUpdatedAt, &snapshot.CapturedAt); err != nil {
 			return nil, err
 		}
-		m.Anchors = append(m.Anchors, a)
+		m.Snapshots = append(m.Snapshots, snapshot)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -306,10 +467,18 @@ func getMilestone(ctx context.Context, q queryer, id string) (*domain.Milestone,
 }
 
 func populateMilestoneSnapshot(ctx context.Context, tx *Tx, out *MilestoneReadSnapshot) error {
-	// Marked snapshot rendering belongs to TASK-003. Planned milestones are the
-	// only mutable/live form implemented here.
-	if out.Milestone.Status != domain.MilestoneStatusPlanned {
+	if out.Milestone.Status == domain.MilestoneStatusMarked {
+		for _, snapshot := range out.Milestone.Snapshots {
+			task := domain.Task{ID: snapshot.TaskID, Title: snapshot.TaskTitle, Priority: snapshot.Priority, CreationOrder: snapshot.CreationOrder, Status: snapshot.Status, AttemptCount: snapshot.AttemptNumber, LastCompletionSummary: snapshot.CompletionSummary, UpdatedAt: snapshot.TaskUpdatedAt}
+			out.Scope = append(out.Scope, task)
+			if snapshot.IsAnchor {
+				out.Anchors = append(out.Anchors, task)
+			}
+		}
 		return nil
+	}
+	if out.Milestone.Status != domain.MilestoneStatusPlanned {
+		return validation("milestone %s has invalid status %s", out.Milestone.ID, out.Milestone.Status)
 	}
 	g, err := tx.graph(ctx)
 	if err != nil {

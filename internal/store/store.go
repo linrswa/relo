@@ -29,6 +29,10 @@ const currentSchemaVersion = 2
 type Store struct {
 	db   *sql.DB
 	root string
+
+	// testAfterWriteLock is used only by package tests to deterministically
+	// coordinate competing writers after BEGIN IMMEDIATE has acquired its lock.
+	testAfterWriteLock func()
 }
 
 type Tx struct{ tx *sql.Tx }
@@ -215,6 +219,9 @@ func (s *Store) withImmediateTx(ctx context.Context, fn func(*sql.Tx) error) err
 				continue
 			}
 			return err
+		}
+		if s.testAfterWriteLock != nil {
+			s.testAfterWriteLock()
 		}
 		err = fn(tx)
 		if err != nil {
