@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -216,4 +217,124 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 	if errEnv["ok"] != false {
 		t.Fatalf("error envelope = %#v", errEnv)
 	}
+}
+
+func TestCLIMilestoneReviewLifecycleEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	must := func(args ...string) string {
+		t.Helper()
+		out, stderr, err := run(t, root, args...)
+		if err != nil {
+			t.Fatalf("%v: stdout=%s stderr=%s: %v", args, out, stderr, err)
+		}
+		return out
+	}
+	must("init", "--prd", "prd.md", "--goal", "review lifecycle")
+
+	// The six-task DAG has two checkpoint anchors and downstream work that
+	// remains dispatchable while the checkpoint is ready.
+	for i, title := range []string{"foundation A", "foundation B", "anchor A", "anchor B", "integration", "follow-up"} {
+		if got := strings.TrimSpace(must("task", "create", "--title", title, "--objective", "O", "--accept", "A")); got != fmt.Sprintf("TASK-%03d", i+1) {
+			t.Fatalf("created ID = %q", got)
+		}
+	}
+	for _, edge := range [][]string{{"TASK-003", "TASK-001"}, {"TASK-004", "TASK-002"}, {"TASK-005", "TASK-003", "TASK-004"}, {"TASK-006", "TASK-004"}} {
+		args := append([]string{"task", "dependency", "add"}, edge...)
+		must(append(args, "--reason", "DAG ordering")...)
+	}
+	if got := strings.TrimSpace(must("milestone", "create", "--title", "integration review", "--reason", "anchors are complete", "--anchor", "TASK-003", "--anchor", "TASK-004", "--recommend", "Review integration boundaries", "--recommend", "Run a refactor sweeper", "--recommend", "Run full tests")); got != "MILESTONE-001" {
+		t.Fatalf("milestone ID = %q", got)
+	}
+	pass := func(id string) {
+		t.Helper()
+		must("task", "start", id)
+		must("task", "pass", id, "--summary", "done")
+	}
+	for _, id := range []string{"TASK-001", "TASK-002", "TASK-003", "TASK-004"} {
+		pass(id)
+	}
+	if got := strings.TrimSpace(must("milestone", "ready")); got != "MILESTONE-001" {
+		t.Fatalf("ready milestone = %q", got)
+	}
+	if ready := must("task", "ready"); !strings.Contains(ready, "TASK-005") {
+		t.Fatalf("ready checkpoint gated downstream work: %q", ready)
+	}
+
+	// A reviewer finding is distinct work, so it gets the next identity rather
+	// than reopening or renumbering an existing task. Re-anchor after inserting
+	// it before the pending downstream integration task.
+	if got := strings.TrimSpace(must("task", "create", "--title", "refactor boundary", "--objective", "O", "--accept", "A", "--priority", "15")); got != "TASK-007" {
+		t.Fatalf("refactor ID = %q", got)
+	}
+	must("task", "dependency", "add", "TASK-007", "TASK-004", "--reason", "refactor builds on anchor B")
+	must("task", "dependency", "add", "TASK-005", "TASK-007", "--reason", "integration uses refactor")
+	blocked := array(t, envelopeData(t, must("status", "--json"))["summary"].(map[string]any)["blocked"])
+	if len(blocked) != 1 || blocked[0] != "TASK-005" {
+		t.Fatalf("TASK-005 was not blocked after dependency insertion: %#v", blocked)
+	}
+	must("milestone", "anchor", "add", "MILESTONE-001", "TASK-007")
+	if got := must("milestone", "ready"); got != "" {
+		t.Fatalf("pending re-anchor remained ready: %q", got)
+	}
+	pass("TASK-007")
+	if got := strings.TrimSpace(must("milestone", "ready")); got != "MILESTONE-001" {
+		t.Fatalf("completed re-anchor not ready: %q", got)
+	}
+	readyTasks := array(t, envelopeData(t, must("status", "--json"))["summary"].(map[string]any)["ready"])
+	if len(readyTasks) != 2 || readyTasks[0] != "TASK-005" || readyTasks[1] != "TASK-006" {
+		t.Fatalf("TASK-005 was not ready after TASK-007 passed: %#v", readyTasks)
+	}
+
+	const markSummary = "Reviewed boundaries; completed distinct refactor and full tests."
+	must("milestone", "mark", "MILESTONE-001", "--summary", markSummary, "--reference", "e2e-run")
+	marked := must("milestone", "get", "MILESTONE-001", "--json")
+	markedMilestone := envelopeData(t, marked)["milestone"].(map[string]any)
+	if markedMilestone["stored_status"] != "marked" || markedMilestone["display_status"] != "marked" || markedMilestone["mark_summary"] != markSummary || markedMilestone["reference"] != "e2e-run" {
+		t.Fatalf("marked status/metadata = %#v", markedMilestone)
+	}
+	for _, field := range []string{"created_at", "updated_at", "marked_at"} {
+		if timestamp, ok := markedMilestone[field].(string); !ok || timestamp == "" {
+			t.Fatalf("marked %s = %#v", field, markedMilestone[field])
+		}
+	}
+	ids := func(field string) []string {
+		t.Helper()
+		values := array(t, markedMilestone[field])
+		out := make([]string, len(values))
+		for i, value := range values {
+			out[i] = value.(map[string]any)["task_id"].(string)
+		}
+		return out
+	}
+	if got := ids("scope"); !reflect.DeepEqual(got, []string{"TASK-007", "TASK-001", "TASK-002", "TASK-003", "TASK-004"}) {
+		t.Fatalf("marked scope IDs = %v", got)
+	}
+	if got := ids("anchors"); !reflect.DeepEqual(got, []string{"TASK-007", "TASK-003", "TASK-004"}) {
+		t.Fatalf("marked anchor IDs = %v", got)
+	}
+	recommendations := array(t, markedMilestone["recommendations"])
+	if len(recommendations) != 3 {
+		t.Fatalf("marked recommendations = %#v", recommendations)
+	}
+	for i, want := range []struct{ id, text string }{{"REC-001", "Review integration boundaries"}, {"REC-002", "Run a refactor sweeper"}, {"REC-003", "Run full tests"}} {
+		got := recommendations[i].(map[string]any)
+		if got["id"] != want.id || got["text"] != want.text {
+			t.Fatalf("recommendation %d = %#v, want %#v", i, got, want)
+		}
+	}
+
+	// The refactor's downstream task is still pending, so reopen is safe. The
+	// next CLI invocation reads a fresh store; marked output must remain the
+	// exact immutable snapshot despite the live task changing.
+	must("task", "reopen", "TASK-007", "--reason", "verify immutable checkpoint history")
+	if got := must("milestone", "get", "MILESTONE-001", "--json"); got != marked {
+		t.Fatalf("marked history drifted after reopen:\nbefore=%s\nafter=%s", marked, got)
+	}
+	if got := must("milestone", "get", "MILESTONE-001", "--json"); got != marked {
+		t.Fatalf("milestone did not persist across CLI/store restart:\nbefore=%s\nafter=%s", marked, got)
+	}
+	must("validate")
 }
