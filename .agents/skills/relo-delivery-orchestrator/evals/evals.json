@@ -1,0 +1,21 @@
+{
+  "skill_name": "relo-delivery-orchestrator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Deliver the clipcatalog PRD as 5-6 tickets using relo, worker subagents, and at least one meaningful milestone checkpoint. Make autonomous recommendation decisions and finish with verified commits and a delivery report.",
+      "expected_output": "A complete tested Go CLI, a fully passed relo DAG, a marked milestone whose summary records recommendation decisions, observable worker handoffs, and Git commits.",
+      "files": ["evals/files/clipcatalog-prd.md"],
+      "expectations": [
+        "The main agent creates 5 or 6 initial tickets with acceptance criteria and dependencies through relo.",
+        "Workers fetch their own tickets with relo task get and do not mutate task or milestone state.",
+        "The main agent starts tickets before dispatch and verifies them before pass.",
+        "A milestone has meaningful anchors and recommendations and does not block unrelated ready work.",
+        "When ready, the agent retrieves the milestone and explicitly acts on or rationally skips recommendations.",
+        "Distinct non-trivial review work becomes a new monotonic ticket and, when checkpoint-critical, a new anchor.",
+        "The milestone is marked only after all final anchors pass, with recommendation decisions in its summary.",
+        "The final implementation passes tests, race checks, vet, formatting, relo validate, and has coherent commits."
+      ]
+    }
+  ]
+}
