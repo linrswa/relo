@@ -573,6 +573,27 @@ func (s *Store) DeleteTask(ctx context.Context, id string) error {
 		if !domain.CanDelete(t.Status) {
 			return validation("%s is %s and cannot be deleted", id, t.Status)
 		}
+		rows, err := tx.tx.QueryContext(ctx, `SELECT m.id FROM milestone_anchors a JOIN milestones m ON m.id=a.milestone_id WHERE a.task_id=? AND m.status='planned' ORDER BY m.creation_order,m.id`, id)
+		if err != nil {
+			return err
+		}
+		var milestoneIDs []string
+		for rows.Next() {
+			var milestoneID string
+			if err := rows.Scan(&milestoneID); err != nil {
+				rows.Close()
+				return err
+			}
+			milestoneIDs = append(milestoneIDs, milestoneID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(milestoneIDs) > 0 {
+			return validation("%s is anchored by planned milestone(s): %s", id, strings.Join(milestoneIDs, ", "))
+		}
 		var n int
 		if err = tx.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM dependencies WHERE dependency_id=?`, id).Scan(&n); err != nil {
 			return err
