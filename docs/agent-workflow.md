@@ -28,12 +28,14 @@ Mutation commands require canonical task IDs such as `TASK-001`. Titles are allo
 ## Core commands
 
 - `relo init --prd prd.md --goal "<goal>"`: create `.relo/` metadata for an existing PRD.
+- `relo project show [--json]`, `relo version`: inspect project metadata or print the build version.
 - `relo project update --goal "..." [--prd docs/prd.md]`: update project metadata; PRD paths are resolved from the project root and hashed atomically.
 - `relo project refresh-prd`: acknowledge current PRD contents by recomputing and storing the PRD hash; review tasks separately because refresh does not mutate them.
 - `relo task create --title "..." --objective "..." --accept "..." [--priority N]`: create a task. At least one acceptance criterion is required. Lower priority numbers sort earlier; default is `100`.
 - `relo task dependency add TASK-ID DEP-ID... --reason "..."`: make `TASK-ID` wait for dependencies. Use `--reason-for DEP-ID=text` when each edge needs a different reason.
 - `relo task dependency remove TASK-ID DEP-ID... --reason "..."`: remove dependency edges.
 - `relo task dependency reason TASK-ID DEP-ID --text "..."`: update one edge reason.
+- `relo task list [--status pending|running|passed|failed] [--json]`: list task summaries.
 - `relo task ready [--details] [--json]`: list the complete ready frontier.
 - `relo task get TASK-ID [--json]` or `relo task get --title "..."`: print project context, objective, acceptance criteria, dependencies, and notes for subagent handoff.
 - `relo milestone create --title "..." --reason "..." --anchor TASK-ID [--recommend "..."]`: create a planned checkpoint.
@@ -54,3 +56,7 @@ Mutation commands require canonical task IDs such as `TASK-001`. Titles are allo
 ## JSON mode and errors
 
 Commands that support `--json` or `--format json` emit a `relo.output/v1` envelope on stdout. Successful envelopes have `ok: true` and a `data` object. JSON errors also go to stdout with `ok: false`; stderr remains empty. Non-JSON failures write human-readable errors to stderr and return a non-zero exit code.
+
+## CLI contracts
+
+Use `relo --help` for command discovery; project lookup walks upward to `.relo/relo.db`. Create requires exactly one objective source (`--objective` or `--objective-file`); update allows one but rejects both. Dependency syntax is `target dependency...`: each later ID is a prerequisite of the first. Stop running tasks before mutation and reopen passed tasks before mutation. `validate` prints warnings on stderr but prints `OK` on stdout whenever there are no errors. Only commands explicitly listed with JSON use the `relo.output/v1` envelope: project show returns goal/PRD path/hash, task list is summary-only, and task get retains its goal/PRD-path project object while adding nullable failure, completion, and current-attempt runtime fields. Milestone readiness uses passed anchors, marking validates anchor transitive scope, and milestones never gate task dispatch.

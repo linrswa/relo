@@ -637,7 +637,7 @@ func TestAcceptanceNotesDependenciesReadyValidateAndRollback(t *testing.T) {
 		t.Fatalf("validate errors = %v", report.Errors)
 	}
 	joined := strings.Join(report.Warnings, "\n")
-	if !strings.Contains(joined, "PRD content hash has changed") || !strings.Contains(joined, "has no notes") || !strings.Contains(joined, "multiple tasks use priority 1") {
+	if !strings.Contains(joined, "PRD content hash has changed") || strings.Contains(joined, "has no notes") || strings.Contains(joined, "multiple tasks use priority") {
 		t.Fatalf("warnings = %v", report.Warnings)
 	}
 }

@@ -1,0 +1,75 @@
+{
+  "skill_name": "relo-cli-guide",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use the supplied sample-prd.md to initialize this repository with relo, create a schema task and an API task with observable acceptance criteria, make the API depend on the schema, then validate the DAG and find what can start. Do not launch any subagents.",
+      "expected_output": "Uses only supported relo commands, preserves generated canonical IDs, adds the dependency in the correct direction with a reason, and finishes with validate, graph, and task ready.",
+      "files": ["evals/files/sample-prd.md"],
+      "expectations": [
+        "The project is initialized from sample-prd.md with a non-empty goal.",
+        "Exactly two tasks exist as TASK-001 and TASK-002, each with a non-empty objective and observable acceptance criteria.",
+        "TASK-002 depends on TASK-001 with a non-empty dependency reason.",
+        "relo validate succeeds and the final ready frontier is exactly TASK-001.",
+        "A report records the supported CLI commands used, important outputs, and resulting state.",
+        "No executed relo command is rejected; command help and read operations may be used for discovery instead of mutation probes."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "TASK-004 is currently running, but I discovered it must depend on TASK-002. Safely change the graph and resume TASK-004. Explain what happens while TASK-002 has not passed yet. Do not intentionally execute invalid commands to discover the state rules.",
+      "expected_output": "Stops TASK-004 with a reason before mutating it, adds TASK-002 as its dependency with a reason, validates and inspects readiness, and starts TASK-004 only after TASK-002 passes and TASK-004 appears in task ready.",
+      "files": [],
+      "expectations": [
+        "TASK-004 has TASK-002 as a dependency with a non-empty reason.",
+        "TASK-004 is finally running on attempt 2, proving its original attempt was stopped before the definition changed and it was later resumed.",
+        "TASK-002 is passed before TASK-004 is resumed, and the final relo state validates successfully.",
+        "The report explains that TASK-004 is blocked after adding an unmet dependency and cannot restart until TASK-002 passes and it returns to task ready.",
+        "The report records the supported stop, dependency add, validation/readiness, dependency completion, and restart commands.",
+        "No executed relo command is rejected, including no attempt to pass TASK-002 while it is pending."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Create a relo milestone anchored on TASK-003 and TASK-004 with a recommendation to run integration tests. Explain when it becomes ready, mark it with an audit summary, and show which milestone read commands support JSON. Inspect the existing graph instead of re-adding fixture dependencies.",
+      "expected_output": "Uses supported milestone create/ready/get/mark syntax, explains anchor-based readiness, transitive scope validation and non-gating behavior, and lists only implemented JSON-capable milestone reads.",
+      "files": [],
+      "expectations": [
+        "Exactly one marked milestone exists with TASK-003 and TASK-004 as anchors and a recommendation to run integration tests.",
+        "The marked milestone snapshot scope contains TASK-001 through TASK-004, all passed, demonstrating transitive dependency scope.",
+        "The milestone has a non-empty audit-oriented mark summary and relo validate succeeds.",
+        "The report explicitly distinguishes anchor-based readiness, complete-scope mark validation, and milestone non-gating behavior.",
+        "Valid relo.output/v1 JSON evidence is captured for milestone get, list, and ready reads, and the report identifies those three JSON-capable milestone commands.",
+        "No executed relo command is rejected and the existing fixture dependencies are not re-added."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "TASK-002 and its downstream TASK-003 have both passed, and TASK-003 depends on TASK-002. Change TASK-002's objective to 'Provide the revised shared API', change its priority to 5 with an audit reason, then return both affected tasks to passed state. Use a legal sequence without probing with rejected mutations.",
+      "expected_output": "Inspects the graph, reopens the passed downstream task before the upstream task, updates TASK-002 only after it is pending, supplies the required priority reason, and reruns TASK-002 before TASK-003.",
+      "files": [],
+      "expectations": [
+        "TASK-002 ends passed with objective 'Provide the revised shared API' and priority 5.",
+        "TASK-003 ends passed and still depends on TASK-002.",
+        "The report records reopening passed descendants from downstream to upstream before changing TASK-002.",
+        "TASK-002 is rerun and passed before TASK-003 is rerun and passed.",
+        "The priority update includes a non-empty --reason and relo validate succeeds.",
+        "No executed relo command is rejected, including no direct reopen of TASK-002 while TASK-003 is still passed."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "MILESTONE-001 is already marked. I want the checkpoint renamed to 'Revised checkpoint' and want a recommendation to run security tests. Preserve immutable history: if the marked milestone cannot be changed, create the correct successor checkpoint anchored on TASK-002 instead. Do not probe marked mutations just to see them fail, and show the final milestones with supported JSON reads.",
+      "expected_output": "Leaves MILESTONE-001 unchanged, explains marked immutability, creates MILESTONE-002 as a planned successor with the requested title, anchor and recommendation, and uses supported JSON read commands without rejected mutations.",
+      "files": [],
+      "expectations": [
+        "MILESTONE-001 remains marked with its original title, summary, scope, and recommendation data unchanged.",
+        "MILESTONE-002 exists as a planned successor titled 'Revised checkpoint', anchored on TASK-002, with a recommendation to run security tests.",
+        "MILESTONE-002 is ready to mark because its anchor is already passed, while task readiness remains unaffected.",
+        "The report explains marked milestone immutability and why a successor was created instead of rewriting history.",
+        "Supported milestone JSON reads are captured and relo validate succeeds.",
+        "No executed relo command is rejected; no update, delete, anchor mutation, recommendation mutation, or second mark is attempted on MILESTONE-001."
+      ]
+    }
+  ]
+}

@@ -742,9 +742,7 @@ Errors：
 Warnings：
 
 - PRD content hash 已改變。
-- Task 沒有 notes。
 - Task 有過多 acceptance criteria。
-- 多個 tasks 使用相同 priority。
 - Title lookup 存在歧義。
 
 Warnings 不阻擋 read operations；是否阻擋 start 由各 warning 類型明確定義。MVP 中只有 errors 阻擋 start。

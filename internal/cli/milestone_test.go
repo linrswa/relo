@@ -338,3 +338,56 @@ func TestCLIMilestoneReviewLifecycleEndToEnd(t *testing.T) {
 	}
 	must("validate")
 }
+
+func TestCLIMilestoneHelpAndMarkedMutationHints(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	must := func(args ...string) string {
+		out, stderr, err := run(t, root, args...)
+		if err != nil {
+			t.Fatalf("%v: %s %v", args, stderr, err)
+		}
+		return out
+	}
+	must("init", "--prd", "prd.md", "--goal", "goal")
+	must("task", "create", "--title", "anchor", "--objective", "O", "--accept", "A")
+	must("milestone", "create", "--title", "Release", "--reason", "track", "--anchor", "TASK-001", "--recommend", "review")
+	for _, args := range [][]string{{"milestone", "--help"}, {"milestone", "get", "--help"}} {
+		out := must(args...)
+		for _, phrase := range []string{"passed anchor", "transitive"} {
+			if !strings.Contains(out, phrase) {
+				t.Fatalf("%v missing %q: %s", args, phrase, out)
+			}
+		}
+		if !strings.Contains(out, "never change task") && !strings.Contains(out, "do not gate") {
+			t.Fatalf("%v missing non-gating semantics: %s", args, out)
+		}
+	}
+	out := must("milestone", "get", "MILESTONE-001")
+	for _, phrase := range []string{"Readiness: passed anchors", "transitive dependency scope", "do not gate task readiness or start"} {
+		if !strings.Contains(out, phrase) {
+			t.Fatalf("human get missing %q: %s", phrase, out)
+		}
+	}
+	must("task", "start", "TASK-001")
+	must("task", "pass", "TASK-001", "--summary", "done")
+	must("milestone", "mark", "MILESTONE-001", "--summary", "done")
+	cases := [][]string{
+		{"milestone", "update", "MILESTONE-001", "--title", "new"},
+		{"milestone", "delete", "MILESTONE-001"},
+		{"milestone", "anchor", "add", "MILESTONE-001", "TASK-001"},
+		{"milestone", "anchor", "remove", "MILESTONE-001", "TASK-001"},
+		{"milestone", "recommendation", "add", "MILESTONE-001", "--text", "new"},
+		{"milestone", "recommendation", "update", "MILESTONE-001", "REC-001", "--text", "new"},
+		{"milestone", "recommendation", "remove", "MILESTONE-001", "REC-001"},
+		{"milestone", "mark", "MILESTONE-001", "--summary", "again"},
+	}
+	for _, args := range cases {
+		_, stderr, err := run(t, root, args...)
+		if exitCode(err) != 2 || !strings.Contains(stderr, "immutable") || !strings.Contains(stderr, "successor") {
+			t.Fatalf("%v: exit=%d stderr=%q", args, exitCode(err), stderr)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,23 @@ type ValidationReport struct {
 	Warnings []string
 }
 
+// taskDefinitionMutationError keeps every definition-edit path actionable.
+func taskDefinitionMutationError(id, status string) error {
+	hint := "stop it first"
+	if status == domain.StatusPassed {
+		hint = "reopen it first"
+	}
+	return validation("%s is %s and cannot be modified; %s", id, status, hint)
+}
+
+func taskDeleteMutationError(id, status string) error {
+	hint := "stop it first"
+	if status == domain.StatusPassed {
+		hint = "reopen it first"
+	}
+	return validation("%s is %s and cannot be deleted; %s", id, status, hint)
+}
+
 func (s *Store) AddAcceptance(ctx context.Context, taskID, text string) (string, error) {
 	if strings.TrimSpace(text) == "" {
 		return "", validation("acceptance criterion text must not be empty")
@@ -40,7 +58,7 @@ func (s *Store) AddAcceptance(ctx context.Context, taskID, text string) (string,
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", taskID, t.Status)
+			return taskDefinitionMutationError(taskID, t.Status)
 		}
 		var max int
 		if err := tx.tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position),-1) FROM acceptance_criteria WHERE task_id=?`, taskID).Scan(&max); err != nil {
@@ -67,7 +85,7 @@ func (s *Store) UpdateAcceptance(ctx context.Context, taskID, acID, text string)
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", taskID, t.Status)
+			return taskDefinitionMutationError(taskID, t.Status)
 		}
 		res, err := tx.tx.ExecContext(ctx, `UPDATE acceptance_criteria SET text=? WHERE task_id=? AND criterion_id=?`, text, taskID, acID)
 		if err != nil {
@@ -88,7 +106,7 @@ func (s *Store) RemoveAcceptance(ctx context.Context, taskID, acID string) error
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", taskID, t.Status)
+			return taskDefinitionMutationError(taskID, t.Status)
 		}
 		if len(t.AcceptanceCriteria) <= 1 {
 			return validation("task must keep at least one acceptance criterion")
@@ -116,7 +134,7 @@ func (s *Store) AddNote(ctx context.Context, taskID, text string) (string, error
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", taskID, t.Status)
+			return taskDefinitionMutationError(taskID, t.Status)
 		}
 		var max int
 		if err := tx.tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position),-1) FROM notes WHERE task_id=?`, taskID).Scan(&max); err != nil {
@@ -142,7 +160,7 @@ func (s *Store) UpdateNote(ctx context.Context, taskID, noteID, text string) err
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", taskID, t.Status)
+			return taskDefinitionMutationError(taskID, t.Status)
 		}
 		res, err := tx.tx.ExecContext(ctx, `UPDATE notes SET text=? WHERE task_id=? AND note_id=?`, text, taskID, noteID)
 		if err != nil {
@@ -163,7 +181,7 @@ func (s *Store) RemoveNote(ctx context.Context, taskID, noteID string) error {
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", taskID, t.Status)
+			return taskDefinitionMutationError(taskID, t.Status)
 		}
 		res, err := tx.tx.ExecContext(ctx, `DELETE FROM notes WHERE task_id=? AND note_id=?`, taskID, noteID)
 		if err != nil {
@@ -246,7 +264,7 @@ func (s *Store) AddDependencies(ctx context.Context, target string, deps []strin
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", target, t.Status)
+			return taskDefinitionMutationError(target, t.Status)
 		}
 		if err := requireExistingTasks(ctx, tx.tx, "dependency task", deps); err != nil {
 			return err
@@ -299,7 +317,7 @@ func (s *Store) RemoveDependencies(ctx context.Context, target string, deps []st
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", target, t.Status)
+			return taskDefinitionMutationError(target, t.Status)
 		}
 		if err := requireExistingTasks(ctx, tx.tx, "dependency task", deps); err != nil {
 			return err
@@ -339,7 +357,7 @@ func (s *Store) UpdateDependencyReason(ctx context.Context, target, dep, text st
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", target, t.Status)
+			return taskDefinitionMutationError(target, t.Status)
 		}
 		if _, err := getTask(ctx, tx.tx, dep); err != nil {
 			return err
@@ -383,9 +401,19 @@ func requireExistingTasks(ctx context.Context, q queryer, label string, ids []st
 func (tx *Tx) graph(ctx context.Context) (dag.Graph, error)   { return loadGraph(ctx, tx.tx) }
 func (s *Store) graph(ctx context.Context) (dag.Graph, error) { return s.Graph(ctx) }
 
+type Attempt struct {
+	AttemptNumber int
+	Status        string
+	StartedAt     string
+	CompletedAt   *string
+	Summary       *string
+	Reason        *string
+}
+
 type TaskReadSnapshot struct {
-	Project domain.Project
-	Task    domain.Task
+	Project        domain.Project
+	Task           domain.Task
+	CurrentAttempt *Attempt
 }
 
 type ReadyReadSnapshot struct {
@@ -421,8 +449,14 @@ func (s *Store) TaskReadSnapshot(ctx context.Context, id string) (TaskReadSnapsh
 		if err != nil {
 			return err
 		}
-		snap.Project = *p
-		snap.Task = *t
+		snap.Project, snap.Task = *p, *t
+		var attempt Attempt
+		err = tx.tx.QueryRowContext(ctx, `SELECT attempt_number,status,started_at,completed_at,summary,reason FROM attempts WHERE task_id=? AND status='running'`, id).Scan(&attempt.AttemptNumber, &attempt.Status, &attempt.StartedAt, &attempt.CompletedAt, &attempt.Summary, &attempt.Reason)
+		if err == nil {
+			snap.CurrentAttempt = &attempt
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		return nil
 	})
 	return snap, err
@@ -439,8 +473,14 @@ func (s *Store) TaskReadSnapshotByTitle(ctx context.Context, title string) (Task
 		if err != nil {
 			return err
 		}
-		snap.Project = *p
-		snap.Task = *t
+		snap.Project, snap.Task = *p, *t
+		var attempt Attempt
+		err = tx.tx.QueryRowContext(ctx, `SELECT attempt_number,status,started_at,completed_at,summary,reason FROM attempts WHERE task_id=? AND status='running'`, t.ID).Scan(&attempt.AttemptNumber, &attempt.Status, &attempt.StartedAt, &attempt.CompletedAt, &attempt.Summary, &attempt.Reason)
+		if err == nil {
+			snap.CurrentAttempt = &attempt
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		return nil
 	})
 	return snap, err
@@ -592,9 +632,8 @@ func (s *Store) Validate(ctx context.Context) (ValidationReport, error) {
 			return err
 		}
 		rows.Close()
-		priorities, titles := map[int]int{}, map[string]int{}
+		titles := map[string]int{}
 		for _, t := range tasks {
-			priorities[t.Priority]++
 			titles[t.Title]++
 			if strings.TrimSpace(t.Title) == "" {
 				r.Errors = append(r.Errors, fmt.Sprintf("%s title is empty", t.ID))
@@ -607,14 +646,6 @@ func (s *Store) Validate(ctx context.Context) (ValidationReport, error) {
 			}
 			if len(t.AcceptanceCriteria) > TooManyAcceptanceCriteriaWarningLimit {
 				r.Warnings = append(r.Warnings, fmt.Sprintf("%s has too many acceptance criteria (%d > %d)", t.ID, len(t.AcceptanceCriteria), TooManyAcceptanceCriteriaWarningLimit))
-			}
-			if len(t.Notes) == 0 {
-				r.Warnings = append(r.Warnings, fmt.Sprintf("%s has no notes", t.ID))
-			}
-		}
-		for priority, n := range priorities {
-			if n > 1 {
-				r.Warnings = append(r.Warnings, fmt.Sprintf("multiple tasks use priority %d", priority))
 			}
 		}
 		for title, n := range titles {

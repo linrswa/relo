@@ -16,6 +16,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Version defaults to dev and may be replaced at build time with -ldflags.
+var Version = "dev"
+
 type app struct{}
 
 // statusSummaryDTO is deliberately separate from render.JSONSummary: graph
@@ -74,12 +77,24 @@ func argsRequestJSON(args []string) bool {
 }
 
 func (a *app) rootCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "relo", SilenceUsage: true, SilenceErrors: true}
+	cmd := &cobra.Command{
+		Use:          "relo",
+		Short:        "Manage an agent-owned task dependency graph",
+		Long:         "relo manages tasks, dependencies, runtime state, and milestone records. Run `relo --help` to discover commands; projects are found from the current directory or any parent containing .relo/relo.db.",
+		Example:      "  relo init --prd docs/prd.md --goal \"Ship the feature\"\n  relo task ready\n  relo task get TASK-001",
+		SilenceUsage: true, SilenceErrors: true,
+	}
 	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return store.ValidationError{Message: err.Error()}
 	})
-	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.milestoneCmd(), a.validateCmd(), a.graphCmd(), a.statusCmd())
+	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.milestoneCmd(), a.validateCmd(), a.graphCmd(), a.statusCmd(), a.versionCmd())
 	return cmd
+}
+
+func (a *app) versionCmd() *cobra.Command {
+	return &cobra.Command{Use: "version", Short: "Print the relo version", Args: validationArgs(cobra.NoArgs), Run: func(cmd *cobra.Command, args []string) {
+		fmt.Fprintln(cmd.OutOrStdout(), Version)
+	}}
 }
 
 func validationArgs(fn cobra.PositionalArgs) cobra.PositionalArgs {
@@ -129,7 +144,7 @@ func (a *app) open(ctx context.Context) (*store.Store, error) {
 
 func (a *app) initCmd() *cobra.Command {
 	var prd, goal string
-	cmd := &cobra.Command{Use: "init", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "init", Short: "Initialize a relo project", Example: "  relo init --prd docs/prd.md --goal \"Ship the feature\"", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := store.InitProject(cmd.Context(), ".", prd, goal)
 		if err != nil {
 			return err
@@ -143,30 +158,38 @@ func (a *app) initCmd() *cobra.Command {
 }
 
 func (a *app) projectCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "project"}
+	cmd := &cobra.Command{Use: "project", Short: "Inspect and update project metadata", Long: "Project metadata records the goal and PRD path/hash."}
 	cmd.AddCommand(a.projectShowCmd(), a.projectUpdateCmd(), a.projectRefreshPRDCmd())
 	return cmd
 }
 
 func (a *app) projectShowCmd() *cobra.Command {
-	return &cobra.Command{Use: "show", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+	var jsonOut bool
+	cmd := &cobra.Command{Use: "show", Short: "Show the project goal and PRD metadata", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
 		defer s.Close()
 		p, err := s.Project(cmd.Context())
 		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
 			return err
+		}
+		if jsonOut {
+			return writeJSONOK(cmd, map[string]any{"project": projectShowDTO{Goal: p.Goal, PRDPath: p.PRDPath, PRDHash: p.PRDHash}})
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Goal: %s\nPRD: %s\nPRD hash: %s\n", p.Goal, p.PRDPath, p.PRDHash)
 		return nil
 	}}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit relo.output/v1 JSON")
+	return cmd
 }
 
 func (a *app) projectUpdateCmd() *cobra.Command {
 	var goal, prd string
-	cmd := &cobra.Command{Use: "update", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "update", Short: "Update project metadata", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		var goalPtr, prdPtr *string
 		if cmd.Flags().Changed("goal") {
 			if strings.TrimSpace(goal) == "" {
@@ -201,7 +224,7 @@ func (a *app) projectUpdateCmd() *cobra.Command {
 }
 
 func (a *app) projectRefreshPRDCmd() *cobra.Command {
-	return &cobra.Command{Use: "refresh-prd", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "refresh-prd", Short: "Refresh the stored PRD hash", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			return err
@@ -218,7 +241,7 @@ func (a *app) projectRefreshPRDCmd() *cobra.Command {
 
 func (a *app) graphCmd() *cobra.Command {
 	var format string
-	cmd := &cobra.Command{Use: "graph", RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "graph", Short: "Render the task dependency graph", RunE: func(cmd *cobra.Command, args []string) error {
 		jsonOut := format == "json"
 		if len(args) != 0 {
 			err := store.ValidationError{Message: fmt.Sprintf("accepts 0 arg(s), received %d", len(args))}
@@ -261,13 +284,13 @@ func (a *app) graphCmd() *cobra.Command {
 		fmt.Fprint(cmd.OutOrStdout(), out)
 		return nil
 	}}
-	cmd.Flags().StringVar(&format, "format", "tree", "")
+	cmd.Flags().StringVar(&format, "format", "tree", "tree or json output format")
 	return cmd
 }
 
 func (a *app) statusCmd() *cobra.Command {
 	var jsonOut bool
-	cmd := &cobra.Command{Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "status", Short: "Show task and milestone status", RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) != 0 {
 			err := store.ValidationError{Message: fmt.Sprintf("accepts 0 arg(s), received %d", len(args))}
 			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
@@ -306,12 +329,12 @@ func (a *app) statusCmd() *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "%s\nMilestones ready to mark: %s\n", render.Status(g), milestoneText)
 		return nil
 	}}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit relo.output/v1 JSON")
 	return cmd
 }
 
 func (a *app) taskCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "task"}
+	cmd := &cobra.Command{Use: "task", Short: "Create, inspect, and run tasks", Long: "Tasks are mutable only while pending or failed. Stop running tasks before editing; reopen passed tasks before editing."}
 	cmd.AddCommand(a.taskCreateCmd(), a.taskGetCmd(), a.taskListCmd(), a.taskUpdateCmd(), a.taskDeleteCmd(), a.taskAcceptanceCmd(), a.taskNoteCmd(), a.taskDependencyCmd(), a.taskReadyCmd(), a.taskStartCmd(), a.taskStopCmd(), a.taskPassCmd(), a.taskFailCmd(), a.taskRetryCmd(), a.taskReopenCmd())
 	return cmd
 }
@@ -320,8 +343,11 @@ func (a *app) taskCreateCmd() *cobra.Command {
 	var title, objective, objectiveFile string
 	var accepts []string
 	var priority int
-	cmd := &cobra.Command{Use: "create", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
-		if objectiveFile != "" {
+	cmd := &cobra.Command{Use: "create", Short: "Create a pending task", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+		if cmd.Flags().Changed("objective") == cmd.Flags().Changed("objective-file") {
+			return store.ValidationError{Message: "provide exactly one of --objective or --objective-file"}
+		}
+		if cmd.Flags().Changed("objective-file") {
 			b, err := os.ReadFile(objectiveFile)
 			if err != nil {
 				return err
@@ -340,18 +366,18 @@ func (a *app) taskCreateCmd() *cobra.Command {
 		fmt.Fprintln(cmd.OutOrStdout(), id)
 		return nil
 	}}
-	cmd.Flags().StringVar(&title, "title", "", "")
-	cmd.Flags().StringVar(&objective, "objective", "", "")
-	cmd.Flags().StringVar(&objectiveFile, "objective-file", "", "")
-	cmd.Flags().StringArrayVar(&accepts, "accept", nil, "")
-	cmd.Flags().IntVar(&priority, "priority", 100, "")
+	cmd.Flags().StringVar(&title, "title", "", "task title")
+	cmd.Flags().StringVar(&objective, "objective", "", "task objective (exactly one objective source is required)")
+	cmd.Flags().StringVar(&objectiveFile, "objective-file", "", "read the task objective from this file")
+	cmd.Flags().StringArrayVar(&accepts, "accept", nil, "acceptance criterion (repeat at least once)")
+	cmd.Flags().IntVar(&priority, "priority", 100, "priority; lower values sort first")
 	return cmd
 }
 
 func (a *app) taskGetCmd() *cobra.Command {
 	var title string
 	var jsonOut bool
-	cmd := &cobra.Command{Use: "get [TASK-ID]", RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "get [TASK-ID]", Short: "Show one task in detail", Example: "  relo task get TASK-001\n  relo task get --title \"Design API\"", RunE: func(cmd *cobra.Command, args []string) error {
 		if title == "" && len(args) != 1 {
 			err := store.ValidationError{Message: "provide TASK-ID or --title"}
 			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
@@ -384,36 +410,43 @@ func (a *app) taskGetCmd() *cobra.Command {
 		renderTask(cmd.OutOrStdout(), &snap.Project, &snap.Task)
 		return nil
 	}}
-	cmd.Flags().StringVar(&title, "title", "", "")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "")
+	cmd.Flags().StringVar(&title, "title", "", "exact task title for read-only lookup")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit relo.output/v1 JSON")
 	return cmd
 }
 
 func (a *app) taskListCmd() *cobra.Command {
 	var status string
-	cmd := &cobra.Command{Use: "list", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+	var jsonOut bool
+	cmd := &cobra.Command{Use: "list", Short: "List task summaries", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.open(cmd.Context())
 		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
 		defer s.Close()
 		tasks, err := s.ListTasks(cmd.Context(), status)
 		if err != nil {
+			writeJSONError(cmd, jsonOut, "", err)
 			return err
+		}
+		if jsonOut {
+			return writeJSONOK(cmd, map[string]any{"tasks": toTaskSummariesDTO(tasks)})
 		}
 		for _, t := range tasks {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\tpriority=%d\t%s\n", t.ID, t.Status, t.Priority, t.Title)
 		}
 		return nil
 	}}
-	cmd.Flags().StringVar(&status, "status", "", "")
+	cmd.Flags().StringVar(&status, "status", "", "stored status: pending, running, passed, or failed")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit relo.output/v1 JSON task summaries")
 	return cmd
 }
 
 func (a *app) taskUpdateCmd() *cobra.Command {
 	var title, objective, objectiveFile, reason string
 	var priority int
-	cmd := &cobra.Command{Use: "update TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "update TASK-ID", Short: "Update a pending or failed task", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireCanonicalTaskID(args[0]); err != nil {
 			return err
 		}
@@ -422,7 +455,10 @@ func (a *app) taskUpdateCmd() *cobra.Command {
 		if cmd.Flags().Changed("title") {
 			tp = &title
 		}
-		if objectiveFile != "" {
+		if cmd.Flags().Changed("objective") && cmd.Flags().Changed("objective-file") {
+			return store.ValidationError{Message: "--objective and --objective-file cannot be combined"}
+		}
+		if cmd.Flags().Changed("objective-file") {
 			b, err := os.ReadFile(objectiveFile)
 			if err != nil {
 				return err
@@ -442,16 +478,16 @@ func (a *app) taskUpdateCmd() *cobra.Command {
 		defer s.Close()
 		return s.UpdateTask(cmd.Context(), args[0], tp, op, pp, reason)
 	}}
-	cmd.Flags().StringVar(&title, "title", "", "")
-	cmd.Flags().StringVar(&objective, "objective", "", "")
-	cmd.Flags().StringVar(&objectiveFile, "objective-file", "", "")
-	cmd.Flags().IntVar(&priority, "priority", 100, "")
-	cmd.Flags().StringVar(&reason, "reason", "", "")
+	cmd.Flags().StringVar(&title, "title", "", "new task title")
+	cmd.Flags().StringVar(&objective, "objective", "", "new task objective")
+	cmd.Flags().StringVar(&objectiveFile, "objective-file", "", "read new objective from this file")
+	cmd.Flags().IntVar(&priority, "priority", 100, "new priority; requires --reason")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason required when changing priority")
 	return cmd
 }
 
 func (a *app) taskDeleteCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "delete TASK-ID", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "delete TASK-ID", Short: "Delete a pending or failed task", Args: validationArgs(cobra.ExactArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireCanonicalTaskID(args[0]); err != nil {
 			return err
 		}

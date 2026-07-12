@@ -312,8 +312,8 @@ func TestCLIMilestone2Commands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate failed out=%s stderr=%s err=%v", out, stderr, err)
 	}
-	if out != "" || !strings.Contains(stderr, "WARNING: TASK-002 has no notes") {
-		t.Fatalf("expected warning on stderr only, out=%q stderr=%q", out, stderr)
+	if out != "OK\n" || stderr != "" {
+		t.Fatalf("expected OK without removed low-value warnings, out=%q stderr=%q", out, stderr)
 	}
 	if _, stderr, err := run(t, root, "task", "dependency", "remove", "TASK-003", "TASK-001", "TASK-999", "--reason", "bad"); err == nil {
 		t.Fatal("mixed dependency remove succeeded")
@@ -991,5 +991,219 @@ func TestCLIRuntimeAtomicityAndExitCodes(t *testing.T) {
 	}
 	if _, _, err := run(t, root, "task", "create", "--title", "bad", "--objective-file", "missing.txt", "--accept", "A"); err == nil || exitCode(err) != 1 {
 		t.Fatalf("unexpected runtime failure exit: %v", err)
+	}
+}
+
+func TestCLIProjectAndTaskSummaryJSONContracts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatalf("init: %s: %v", stderr, err)
+	}
+	if _, stderr, err := run(t, root, "task", "create", "--title", "T", "--objective", "O", "--accept", "A"); err != nil {
+		t.Fatalf("create: %s: %v", stderr, err)
+	}
+	out, stderr, err := run(t, root, "project", "show", "--json")
+	if err != nil || stderr != "" {
+		t.Fatalf("project show json: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	projectData := envelopeData(t, out)
+	requireKeys(t, projectData, "project")
+	projectFields, ok := projectData["project"].(map[string]any)
+	if !ok {
+		t.Fatalf("project = %#v", projectData["project"])
+	}
+	requireKeys(t, projectFields, "goal", "prd_path", "prd_hash")
+	if projectFields["goal"] != "goal" || projectFields["prd_path"] != "prd.md" || projectFields["prd_hash"] == "" {
+		t.Fatalf("project fields = %#v", projectFields)
+	}
+	out, stderr, err = run(t, root, "task", "list", "--status", "pending", "--json")
+	if err != nil || stderr != "" {
+		t.Fatalf("task list json: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	var list struct {
+		Data struct {
+			Tasks []map[string]json.RawMessage `json:"tasks"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Data.Tasks == nil || len(list.Data.Tasks) != 1 {
+		t.Fatalf("task summaries = %#v", list.Data.Tasks)
+	}
+	summary := make(map[string]any, len(list.Data.Tasks[0]))
+	encoded, err := json.Marshal(list.Data.Tasks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &summary); err != nil {
+		t.Fatal(err)
+	}
+	requireKeys(t, summary, "id", "title", "status", "priority", "attempt_count", "last_failure_reason", "last_completion_summary", "created_at", "updated_at")
+	if summary["id"] != "TASK-001" || summary["title"] != "T" || summary["status"] != "pending" || summary["attempt_count"] != float64(0) || summary["last_failure_reason"] != nil || summary["last_completion_summary"] != nil {
+		t.Fatalf("summary = %#v", summary)
+	}
+	out, stderr, err = run(t, root, "version")
+	if err != nil || stderr != "" || out != "dev\n" {
+		t.Fatalf("version = out=%q stderr=%q err=%v", out, stderr, err)
+	}
+	_, _, err = run(t, root, "version", "extra")
+	if exitCode(err) != 2 {
+		t.Fatalf("version extra exit = %d", exitCode(err))
+	}
+}
+
+func TestCLIJSONTaskDetailLifecycleAndErrors(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	must := func(args ...string) string {
+		out, stderr, err := run(t, root, args...)
+		if err != nil {
+			t.Fatalf("%v: %s %v", args, stderr, err)
+		}
+		return out
+	}
+	must("init", "--prd", "prd.md", "--goal", "goal")
+	must("task", "create", "--title", "T", "--objective", "O", "--accept", "A")
+	get := func() map[string]any { return envelopeData(t, must("task", "get", "TASK-001", "--json")) }
+	assertDetail := func(wantStatus string, attempts float64, current any, failure, completion any) {
+		d := get()
+		requireKeys(t, d, "project", "task")
+		project := d["project"].(map[string]any)
+		requireKeys(t, project, "goal", "prd_path")
+		task := d["task"].(map[string]any)
+		requireKeys(t, task, "id", "title", "status", "priority", "objective", "acceptance_criteria", "dependencies", "notes", "creation_order", "attempt_count", "last_failure_reason", "last_completion_summary", "created_at", "updated_at", "current_attempt")
+		if task["status"] != wantStatus || task["attempt_count"] != attempts || task["current_attempt"] != current || task["last_failure_reason"] != failure || task["last_completion_summary"] != completion {
+			t.Fatalf("detail=%#v", task)
+		}
+	}
+	assertDetail("pending", 0, nil, nil, nil)
+	must("task", "start", "TASK-001")
+	d := get()
+	task := d["task"].(map[string]any)
+	attempt := task["current_attempt"].(map[string]any)
+	requireKeys(t, attempt, "attempt_number", "status", "started_at", "completed_at", "summary", "reason")
+	if attempt["attempt_number"] != float64(1) || attempt["status"] != "running" || attempt["started_at"] == "" || attempt["completed_at"] != nil || attempt["summary"] != nil || attempt["reason"] != nil {
+		t.Fatalf("running attempt=%#v", attempt)
+	}
+	must("task", "fail", "TASK-001", "--reason", "bad")
+	assertDetail("failed", 1, nil, "bad", nil)
+	must("task", "retry", "TASK-001")
+	must("task", "start", "TASK-001")
+	must("task", "pass", "TASK-001", "--summary", "done")
+	assertDetail("passed", 2, nil, "bad", "done")
+
+	out, stderr, err := run(t, t.TempDir(), "project", "show", "--json")
+	if err == nil || stderr != "" {
+		t.Fatalf("project JSON error: out=%q stderr=%q err=%v", out, stderr, err)
+	}
+	if e := jsonObject(t, out); e["ok"] != false {
+		t.Fatalf("error envelope=%#v", e)
+	}
+	out, stderr, err = run(t, root, "task", "list", "--status", "invalid", "--json")
+	if err == nil || stderr != "" {
+		t.Fatalf("list JSON error: out=%q stderr=%q err=%v", out, stderr, err)
+	}
+	if e := jsonObject(t, out); e["ok"] != false {
+		t.Fatalf("error envelope=%#v", e)
+	}
+	out, stderr, err = run(t, root, "task", "list", "--status", "running", "--json")
+	if err != nil || stderr != "" {
+		t.Fatalf("empty list: %s %v", stderr, err)
+	}
+	data := envelopeData(t, out)
+	if tasks := array(t, data["tasks"]); len(tasks) != 0 {
+		t.Fatalf("empty tasks=%#v", tasks)
+	}
+}
+
+func TestCLIObjectiveHelpRecoveryAndWarnings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "objective.txt"), []byte("file objective"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	must := func(args ...string) string {
+		out, stderr, err := run(t, root, args...)
+		if err != nil {
+			t.Fatalf("%v: %s %v", args, stderr, err)
+		}
+		return out
+	}
+	must("init", "--prd", "prd.md", "--goal", "goal")
+	fail := func(args ...string) string {
+		_, stderr, err := run(t, root, args...)
+		if exitCode(err) != 2 {
+			t.Fatalf("%v exit=%d stderr=%s", args, exitCode(err), stderr)
+		}
+		return stderr
+	}
+	fail("task", "create", "--title", "bad", "--objective", "x", "--objective-file", "objective.txt", "--accept", "A")
+	fail("task", "create", "--title", "bad", "--accept", "A")
+	if out := must("task", "list", "--json"); len(array(t, envelopeData(t, out)["tasks"])) != 0 {
+		t.Fatal("rejected create mutated store")
+	}
+	must("task", "create", "--title", "T", "--objective", "original", "--accept", "A")
+	fail("task", "update", "TASK-001", "--objective", "x", "--objective-file", "objective.txt")
+	out := must("task", "get", "TASK-001", "--json")
+	if envelopeData(t, out)["task"].(map[string]any)["objective"] != "original" {
+		t.Fatal("rejected update mutated objective")
+	}
+	if _, _, err := run(t, root, "task", "update", "TASK-001", "--objective-file", "missing"); err == nil {
+		t.Fatal("missing objective file succeeded")
+	}
+	out = must("task", "get", "TASK-001", "--json")
+	if envelopeData(t, out)["task"].(map[string]any)["objective"] != "original" {
+		t.Fatal("failed file update mutated objective")
+	}
+
+	must("task", "start", "TASK-001")
+	if got := fail("task", "note", "add", "TASK-001", "--text", "n"); !strings.Contains(got, "stop it first") {
+		t.Fatalf("running hint=%s", got)
+	}
+	must("task", "stop", "TASK-001", "--reason", "pause")
+	if got := fail("task", "pass", "TASK-001", "--summary", "x"); !strings.Contains(got, "start") {
+		t.Fatalf("pending pass hint=%s", got)
+	}
+	must("task", "create", "--title", "blocked", "--objective", "O", "--accept", "A")
+	must("task", "dependency", "add", "TASK-002", "TASK-001", "--reason", "needs")
+	if got := fail("task", "start", "TASK-002"); !strings.Contains(got, "pass dependencies") {
+		t.Fatalf("blocked start hint=%s", got)
+	}
+	must("task", "start", "TASK-001")
+	must("task", "pass", "TASK-001", "--summary", "ok")
+	must("task", "start", "TASK-002")
+	if got := fail("task", "reopen", "TASK-001", "--reason", "redo"); !strings.Contains(got, "descendants") {
+		t.Fatalf("reopen hint=%s", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "prd.md"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, err := run(t, root, "validate")
+	if err != nil || out != "OK\n" || !strings.Contains(stderr, "WARNING:") {
+		t.Fatalf("validate warning: out=%q stderr=%q err=%v", out, stderr, err)
+	}
+	out, stderr, err = run(t, root, "--help")
+	if err != nil || !strings.Contains(out, "version") || !strings.Contains(out, "manages") || stderr != "" {
+		t.Fatalf("root help=%q stderr=%q", out, stderr)
+	}
+	out, _, _ = run(t, root, "task", "dependency", "--help")
+	if !strings.Contains(out, "dependent") {
+		t.Fatalf("dependency group help=%q", out)
+	}
+	out, _, _ = run(t, root, "task", "dependency", "add", "--help")
+	if !strings.Contains(out, "Example") {
+		t.Fatalf("dependency add help=%q", out)
+	}
+	out, _, _ = run(t, root, "task", "create", "--help")
+	if !strings.Contains(out, "exactly one") {
+		t.Fatalf("create help=%q", out)
 	}
 }

@@ -33,10 +33,13 @@ func (s *Store) StartTasks(ctx context.Context, ids []string) ([]string, error) 
 				return err
 			}
 			if t.Status != domain.StatusPending {
+				if t.Status == domain.StatusFailed {
+					return validation("%s is %s and cannot be started; retry it first", id, t.Status)
+				}
 				return validation("%s is %s and cannot be started", id, t.Status)
 			}
 			if !ready[id] {
-				return validation("%s is blocked by unmet dependencies", id)
+				return validation("%s is blocked by unmet dependencies; pass dependencies or inspect `relo task ready`", id)
 			}
 			if n, err := openAttemptCount(ctx, tx.tx, id); err != nil {
 				return err
@@ -150,7 +153,7 @@ func (s *Store) ReopenTask(ctx context.Context, id, reason string) error {
 			return err
 		}
 		if len(affected) > 0 {
-			return validation("%s cannot be reopened because downstream task(s) are running or passed: %s", id, strings.Join(affected, ", "))
+			return validation("%s cannot be reopened because downstream task(s) are running or passed: %s; stop or reopen descendants first", id, strings.Join(affected, ", "))
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		if _, err := tx.tx.ExecContext(ctx, `UPDATE tasks SET status='pending', updated_at=? WHERE id=?`, now, id); err != nil {
@@ -171,6 +174,9 @@ func (s *Store) closeRunningTask(ctx context.Context, id, status, summary, reaso
 			return err
 		}
 		if t.Status != domain.StatusRunning {
+			if t.Status == domain.StatusPending && (status == domain.StatusPassed || status == domain.StatusFailed) {
+				return validation("%s is pending and cannot transition to %s; start it first", id, status)
+			}
 			return validation("%s is %s and cannot transition to %s", id, t.Status, status)
 		}
 		if err := requireExactlyOneOpenAttempt(ctx, tx.tx, id); err != nil {

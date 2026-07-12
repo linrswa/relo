@@ -86,6 +86,10 @@ func (s *Store) CreateMilestone(ctx context.Context, title, reason string, ancho
 	return id, err
 }
 
+func milestoneMutationError(id, status, action string) error {
+	return validation("%s is %s and cannot be %s; marked milestones are immutable; create a successor milestone", id, status, action)
+}
+
 func (s *Store) AddMilestoneRecommendation(ctx context.Context, milestoneID, text string) (string, error) {
 	if strings.TrimSpace(text) == "" {
 		return "", validation("recommendation text must not be empty")
@@ -97,7 +101,7 @@ func (s *Store) AddMilestoneRecommendation(ctx context.Context, milestoneID, tex
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be modified", milestoneID, m.Status)
+			return milestoneMutationError(milestoneID, m.Status, "modified")
 		}
 		id = domain.RecommendationID(m.NextRecommendationSequence)
 		var position int
@@ -124,7 +128,7 @@ func (s *Store) UpdateMilestoneRecommendation(ctx context.Context, milestoneID, 
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be modified", milestoneID, m.Status)
+			return milestoneMutationError(milestoneID, m.Status, "modified")
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		res, err := tx.tx.ExecContext(ctx, `UPDATE milestone_recommendations SET text=?,updated_at=? WHERE milestone_id=? AND recommendation_id=?`, text, now, milestoneID, recommendationID)
@@ -146,7 +150,7 @@ func (s *Store) RemoveMilestoneRecommendation(ctx context.Context, milestoneID, 
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be modified", milestoneID, m.Status)
+			return milestoneMutationError(milestoneID, m.Status, "modified")
 		}
 		res, err := tx.tx.ExecContext(ctx, `DELETE FROM milestone_recommendations WHERE milestone_id=? AND recommendation_id=?`, milestoneID, recommendationID)
 		if err != nil {
@@ -176,7 +180,7 @@ func (s *Store) UpdateMilestone(ctx context.Context, id string, title, reason *s
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be modified", id, m.Status)
+			return milestoneMutationError(id, m.Status, "modified")
 		}
 		newTitle, newReason := m.Title, m.Reason
 		if title != nil {
@@ -197,7 +201,7 @@ func (s *Store) DeleteMilestone(ctx context.Context, id string) error {
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be deleted", id, m.Status)
+			return milestoneMutationError(id, m.Status, "deleted")
 		}
 		_, err = tx.tx.ExecContext(ctx, `DELETE FROM milestones WHERE id=?`, id)
 		return err
@@ -214,7 +218,7 @@ func (s *Store) AddMilestoneAnchors(ctx context.Context, id string, taskIDs []st
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be modified", id, m.Status)
+			return milestoneMutationError(id, m.Status, "modified")
 		}
 		if err := requireExistingTasks(ctx, tx.tx, "anchor task", taskIDs); err != nil {
 			return err
@@ -249,7 +253,7 @@ func (s *Store) RemoveMilestoneAnchors(ctx context.Context, id string, taskIDs [
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be modified", id, m.Status)
+			return milestoneMutationError(id, m.Status, "modified")
 		}
 		var total int
 		if err := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM milestone_anchors WHERE milestone_id=?`, id).Scan(&total); err != nil {
@@ -293,7 +297,7 @@ func (s *Store) MarkMilestone(ctx context.Context, id, summary, reference string
 			return err
 		}
 		if !domain.CanModifyMilestone(m.Status) {
-			return validation("%s is %s and cannot be marked", id, m.Status)
+			return milestoneMutationError(id, m.Status, "marked")
 		}
 		g, err := tx.graph(ctx)
 		if err != nil {

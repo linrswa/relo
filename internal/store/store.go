@@ -523,7 +523,7 @@ func (s *Store) UpdateTask(ctx context.Context, id string, title *string, object
 			return err
 		}
 		if !domain.CanModifyDefinition(t.Status) {
-			return validation("%s is %s and cannot be modified", id, t.Status)
+			return taskDefinitionMutationError(id, t.Status)
 		}
 		if priority != nil && *priority < 0 {
 			return validation("--priority must be >= 0")
@@ -578,7 +578,7 @@ func (s *Store) DeleteTask(ctx context.Context, id string) error {
 			return err
 		}
 		if !domain.CanDelete(t.Status) {
-			return validation("%s is %s and cannot be deleted", id, t.Status)
+			return taskDeleteMutationError(id, t.Status)
 		}
 		rows, err := tx.tx.QueryContext(ctx, `SELECT m.id FROM milestone_anchors a JOIN milestones m ON m.id=a.milestone_id WHERE a.task_id=? AND m.status='planned' ORDER BY m.creation_order,m.id`, id)
 		if err != nil {
