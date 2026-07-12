@@ -1,0 +1,101 @@
+{
+  "skill_name": "relo-delivery-workflow",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use multi-stage-prd.md to initialize this repository and plan the delivery in relo. Create focused tasks, acceptance criteria, and real dependency edges. Do not implement the application yet. Finish by validating and reporting the initial ready frontier and key planning decisions.",
+      "expected_output": "Creates a compact schema-to-repository-to-API DAG, optionally separating substantial integration or rollback verification, and proactively creates one meaningful integration milestone because the PRD contains a cross-layer boundary. It then validates the project and reports only the schema task as ready.",
+      "files": ["evals/files/multi-stage-prd.md"],
+      "expectations": [
+        "The project is initialized from multi-stage-prd.md with a non-empty delivery goal.",
+        "A compact plan of three to five focused tasks represents the schema/migration, repository, and HTTP API work, optionally separating substantial integration or rollback verification; focused tests are not mechanically split into a separate task for every layer.",
+        "The repository task depends on the schema task and the API task depends on the repository task, with non-empty dependency reasons.",
+        "Exactly one planned milestone is created without the prompt explicitly requiring one, anchored at the API or equivalent combined integration boundary rather than duplicating a checkpoint for every layer.",
+        "The milestone includes a recommendation covering cross-layer integration testing or migration rollback review rather than merely repeating one task acceptance criterion.",
+        "relo validate succeeds and the final ready frontier contains only the schema task.",
+        "The report explains why the integration boundary justified a milestone and records the resulting task and milestone IDs."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use trivial-prd.md to initialize this repository and plan the work in relo. Do not implement the correction yet. Keep the workflow proportional, validate the resulting state, and report the key planning decisions.",
+      "expected_output": "Creates one verifiable typo-correction task, deliberately omits milestones because a checkpoint would duplicate the task acceptance criteria, validates successfully, and reports the task as ready.",
+      "files": ["evals/files/trivial-prd.md"],
+      "expectations": [
+        "The project is initialized from trivial-prd.md with a non-empty goal.",
+        "Exactly one pending task covers the typo correction and affected help-output test without unrelated work.",
+        "The task has an observable acceptance criterion requiring the affected test or equivalent verification to pass.",
+        "No milestone is created.",
+        "The report explicitly says a milestone was evaluated and omitted because this is a single low-risk task whose checkpoint would duplicate task verification.",
+        "relo validate succeeds and the only task is ready."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Start from a clean repository containing review-discovery-prd.md and setup-review-discovery.sh. First run the setup script with the supplied relo executable path; it uses only public relo commands to create two passed fixture tasks and one ready integration milestone. Then perform the checkpoint decision using relo. The review reveals distinct missing authorization work. Update the delivery state so the checkpoint cannot be marked until that work is completed; do not implement or pass the new work yet.",
+      "expected_output": "Reproducibly prepares and inspects the ready milestone, creates a normal authorization task with acceptance criteria, adds it as an anchor, leaves the milestone planned and no longer ready, and validates the revised state instead of marking prematurely.",
+      "files": [
+        "evals/files/review-discovery-prd.md",
+        "evals/files/review-go.mod",
+        "evals/files/review-account.go.txt",
+        "evals/files/review-account_test.go.txt",
+        "evals/files/setup-review-discovery.sh"
+      ],
+      "expectations": [
+        "The existing passed persistence and API tasks remain passed rather than being rewritten for distinct authorization work.",
+        "A new pending authorization task is created with observable acceptance criteria.",
+        "The new authorization task is added as a milestone anchor so the milestone leaves the ready set.",
+        "The milestone remains planned and is not marked merely because its original anchors passed.",
+        "The report distinguishes distinct review-discovered work from a missed original acceptance criterion.",
+        "relo validate succeeds after the revision."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Start from a clean repository containing the execution fixture files. First run setup-execution-fixture.sh with the supplied relo executable path; it installs the Go fixture and creates a two-task DAG with a milestone using only public relo commands. No subagent or worktree tools are available. Use the current agent to implement and verify each ready task, keep relo state truthful, review the ready milestone, and report completion.",
+      "expected_output": "Reproducibly prepares and completes the greeting fixture without inventing handoffs, starts work before implementation, verifies before passing, reviews and marks the milestone, and finishes with valid consistent state and passing Go tests.",
+      "files": [
+        "evals/files/execution-prd.md",
+        "evals/files/execution-go.mod",
+        "evals/files/execution-greeting.go.txt",
+        "evals/files/execution-greeting_test.go.txt",
+        "evals/files/setup-execution-fixture.sh"
+      ],
+      "expectations": [
+        "No fictitious subagent, worker run, worktree, or handoff is claimed.",
+        "Only tasks returned by a fresh ready query are started.",
+        "Each task is verified against its acceptance criteria before it is passed.",
+        "Any ready milestone is reviewed rather than automatically marked when anchors pass.",
+        "Final relo validation succeeds with no unintended running, ready, blocked, or failed tasks.",
+        "The report includes actual verification evidence and any milestone decision."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "What is the exact relo command to add TASK-001 and TASK-002 as prerequisites of TASK-004 with a different reason for each edge? Explain the positional direction, but do not plan or execute a delivery workflow.",
+      "expected_output": "Answers the narrow CLI syntax question without imposing task planning, milestones, dispatch, or a full delivery loop.",
+      "files": [],
+      "expectations": [
+        "The answer uses TASK-004 as the first target ID followed by TASK-001 and TASK-002.",
+        "The answer uses one --reason-for mapping per prerequisite and does not combine --reason with --reason-for.",
+        "The answer explains that TASK-004 waits for TASK-001 and TASK-002.",
+        "The answer does not create milestones, launch workers, or impose a delivery plan."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Use substantial-verification-prd.md to initialize this repository and plan the delivery in relo. Do not implement it. Choose task boundaries deliberately, including how focused tests and the larger release verification should be represented. Validate the DAG and report the initial ready frontier and checkpoint decision.",
+      "expected_output": "Keeps local pricing and checkout API tests as acceptance criteria of their implementation tasks, creates distinct end-to-end harness and release-verification work with its own acceptance criteria, and anchors one release-readiness milestone on the final combined verification boundary. Harness construction may be parallel when its final execution still depends on completed checkout behavior.",
+      "files": ["evals/files/substantial-verification-prd.md"],
+      "expectations": [
+        "The plan contains focused pricing and checkout API implementation tasks whose acceptance criteria include their local unit tests.",
+        "The plan does not create standalone pricing-unit-test or checkout-API-unit-test tasks with no independent delivery value.",
+        "One or more separate end-to-end verification tasks own the new multi-component harness, fixtures or environment, payment scenarios, cleanup, and CI behavior.",
+        "Final end-to-end verification depends on the checkout implementation and any separately prepared harness, and the verification work has its own observable acceptance criteria.",
+        "Exactly one planned release-readiness or integration milestone is anchored on the final end-to-end verification task or equivalent combined verification boundary.",
+        "The report explains why focused local tests are acceptance criteria while the substantial cross-component verification is an independent task.",
+        "relo validate succeeds and the initial ready frontier contains the pricing implementation task; any additional ready task is independently useful harness preparation rather than premature end-to-end execution."
+      ]
+    }
+  ]
+}

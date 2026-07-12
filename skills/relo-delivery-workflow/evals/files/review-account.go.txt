@@ -1,0 +1,53 @@
+package account
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+type Account struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type Store struct {
+	next     int
+	accounts map[int]Account
+}
+
+func NewStore() *Store {
+	return &Store{next: 1, accounts: make(map[int]Account)}
+}
+
+func (s *Store) Create(name string) Account {
+	account := Account{ID: s.next, Name: name}
+	s.next++
+	s.accounts[account.ID] = account
+	return account
+}
+
+func (s *Store) Get(id int) (Account, bool) {
+	account, ok := s.accounts[id]
+	return account, ok
+}
+
+type API struct {
+	Store *Store
+}
+
+func (a API) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /accounts", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Name == "" {
+			http.Error(w, "invalid account", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(a.Store.Create(request.Name))
+	})
+	return mux
+}

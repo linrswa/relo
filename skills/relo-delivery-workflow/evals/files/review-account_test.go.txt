@@ -1,0 +1,31 @@
+package account
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestStoreCreateAndGet(t *testing.T) {
+	store := NewStore()
+	created := store.Create("Ada")
+	got, ok := store.Get(created.ID)
+	if !ok || got != created {
+		t.Fatalf("Get() = %#v, %v; want %#v, true", got, ok, created)
+	}
+}
+
+func TestAccountCreationAPI(t *testing.T) {
+	store := NewStore()
+	request := httptest.NewRequest(http.MethodPost, "/accounts", strings.NewReader(`{"name":"Ada"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	API{Store: store}.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusCreated)
+	}
+	if _, ok := store.Get(1); !ok {
+		t.Fatal("created account was not persisted")
+	}
+}

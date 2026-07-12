@@ -1,0 +1,22 @@
+package greeting
+
+import "testing"
+
+func TestNormalizeName(t *testing.T) {
+	if got := NormalizeName("  Ada  "); got != "Ada" {
+		t.Fatalf("NormalizeName() = %q, want Ada", got)
+	}
+}
+
+func TestGreeting(t *testing.T) {
+	got, err := Greeting("  Ada  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Hello, Ada!" {
+		t.Fatalf("Greeting() = %q", got)
+	}
+	if _, err := Greeting("   "); err == nil {
+		t.Fatal("Greeting() accepted an empty normalized name")
+	}
+}

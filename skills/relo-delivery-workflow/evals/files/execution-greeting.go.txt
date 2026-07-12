@@ -1,0 +1,13 @@
+package greeting
+
+import (
+	"errors"
+)
+
+func NormalizeName(name string) string {
+	panic("TODO")
+}
+
+func Greeting(name string) (string, error) {
+	return "", errors.New("TODO")
+}

@@ -264,6 +264,15 @@ test -z "$(gofmt -l cmd internal)"
 - [Original MVP design plan](plan.md)
 - [Milestone checkpoint design](milestone_plan.md)
 
+## Agent skills
+
+Tool-neutral Agent Skills packages live under [`skills/`](skills/):
+
+- [`relo-cli-guide`](skills/relo-cli-guide/SKILL.md) documents the public CLI contract and legal state transitions.
+- [`relo-delivery-workflow`](skills/relo-delivery-workflow/SKILL.md) guides PRD-to-DAG planning, proportional execution, and deliberate milestone checkpoint decisions.
+
+The repository intentionally does not duplicate these packages into harness-specific discovery directories. Install the complete desired skill folder in the location used by your agent—for example `.agents/skills/` for Codex, `.claude/skills/` for Claude Code, or `.kiro/skills/` for Kiro. Keep bundled references and other files with `SKILL.md` when copying a package.
+
 ## Current scope
 
 The repository contains an implemented and tested MVP. It intentionally does not provide:
