@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"relo/internal/domain"
+	"github.com/linrswa/relo/internal/domain"
 )
 
 type Task struct {

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"relo/internal/domain"
-	"relo/internal/store"
+	"github.com/linrswa/relo/internal/domain"
+	"github.com/linrswa/relo/internal/store"
 
 	"github.com/spf13/cobra"
 )

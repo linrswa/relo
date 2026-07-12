@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"relo/internal/domain"
+	"github.com/linrswa/relo/internal/domain"
 
 	_ "modernc.org/sqlite"
 )

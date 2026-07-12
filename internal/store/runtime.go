@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"relo/internal/domain"
+	"github.com/linrswa/relo/internal/domain"
 )
 
 func (s *Store) StartTasks(ctx context.Context, ids []string) ([]string, error) {

@@ -16,25 +16,35 @@ The CLI enforces task and DAG invariants; it does not choose tasks, launch worke
 - Define optional milestone checkpoints with immutable marked snapshots
 - Persist state in a private SQLite database without requiring CGO
 
-## Requirements
+## Install
 
-- Go 1.26.5 or newer
+### Release binaries
 
-## Build
+Download a prebuilt archive from [GitHub Releases](https://github.com/linrswa/relo/releases). Release archives are available for:
+
+- Linux: amd64 and arm64
+- macOS: Intel and Apple silicon
+- Windows: amd64 and arm64
+
+Each release includes `checksums.txt` with SHA-256 checksums for its archives.
+
+### Go install
+
+Go 1.26.5 or newer is required:
 
 ```bash
+go install github.com/linrswa/relo/cmd/relo@latest
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/linrswa/relo.git
+cd relo
 mkdir -p ./bin
 go build -o ./bin/relo ./cmd/relo
 ./bin/relo --help
 ```
-
-To install into your configured `GOBIN` or `GOPATH/bin`:
-
-```bash
-go install ./cmd/relo
-```
-
-This repository currently provides source code rather than published release binaries.
 
 ## Quick start
 
@@ -51,20 +61,20 @@ EOF
 Initialize relo in the repository:
 
 ```bash
-./bin/relo init --prd prd.md --goal "Build the example service"
+relo init --prd prd.md --goal "Build the example service"
 ```
 
 Create two tasks. Each task needs an objective and at least one acceptance criterion:
 
 ```bash
-./bin/relo task create \
+relo task create \
   --title "Create service model" \
   --objective "Define and test the service data model" \
   --accept "The model package tests pass" \
   --priority 10
 # TASK-001
 
-./bin/relo task create \
+relo task create \
   --title "Add service API" \
   --objective "Expose the service model through an API" \
   --accept "API tests cover create and read operations" \
@@ -75,29 +85,29 @@ Create two tasks. Each task needs an objective and at least one acceptance crite
 Make the API task wait for the model task:
 
 ```bash
-./bin/relo task dependency add TASK-002 TASK-001 \
+relo task dependency add TASK-002 TASK-001 \
   --reason "The API uses the service model"
 ```
 
 Validate and inspect the graph:
 
 ```bash
-./bin/relo validate
-./bin/relo graph
-./bin/relo task ready --details
+relo validate
+relo graph
+relo task ready --details
 ```
 
 Start and complete the ready work:
 
 ```bash
-./bin/relo task start TASK-001
-./bin/relo task pass TASK-001 --summary "Model implemented and tested"
+relo task start TASK-001
+relo task pass TASK-001 --summary "Model implemented and tested"
 
-./bin/relo task ready --details
-./bin/relo task start TASK-002
-./bin/relo task pass TASK-002 --summary "API implemented and tested"
+relo task ready --details
+relo task start TASK-002
+relo task pass TASK-002 --summary "API implemented and tested"
 
-./bin/relo status
+relo status
 ```
 
 Initialization creates `.relo/relo.db`. The database is ignored by Git and is an internal implementation detail—use the CLI rather than reading or editing it directly.
@@ -257,6 +267,8 @@ go vet ./...
 test -z "$(gofmt -l cmd internal)"
 ```
 
+Tags matching `v*` trigger the GitHub Actions release workflow. GoReleaser builds the supported platform archives, injects the release version into `relo version`, generates SHA-256 checksums, and publishes a GitHub Release.
+
 ## Documentation
 
 - [Agent workflow and command reference](docs/agent-workflow.md)
@@ -295,3 +307,7 @@ Task creation requires exactly one of `--objective` or `--objective-file`; updat
 `relo project show --json`, `relo task list --json`, and `relo task get --json` use the `relo.output/v1` envelope. Project show includes `goal`, `prd_path`, and `prd_hash`; list output is summary-only. Task get's nested project remains `goal` and `prd_path`, and its task detail includes creation/runtime fields; `last_failure_reason`, `last_completion_summary`, and `current_attempt` are nullable. `current_attempt` is present only while running and has nullable `completed_at`, `summary`, and `reason`. `relo validate` writes warnings to stderr and always writes `OK` to stdout when it has no errors.
 
 Milestone readiness means every anchor passed. Marking validates anchors and their transitive dependency scope; milestones are non-gating and never affect task readiness, dependency legality, or start.
+
+## License
+
+`relo` is available under the [MIT License](LICENSE).

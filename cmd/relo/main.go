@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"relo/internal/cli"
+	"github.com/linrswa/relo/internal/cli"
 )
 
 func main() { os.Exit(cli.Execute()) }

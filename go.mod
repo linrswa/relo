@@ -1,4 +1,4 @@
-module relo
+module github.com/linrswa/relo
 
 go 1.26.5
 

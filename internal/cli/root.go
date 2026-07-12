@@ -9,9 +9,9 @@ import (
 	"os"
 	"strings"
 
-	"relo/internal/domain"
-	"relo/internal/render"
-	"relo/internal/store"
+	"github.com/linrswa/relo/internal/domain"
+	"github.com/linrswa/relo/internal/render"
+	"github.com/linrswa/relo/internal/store"
 
 	"github.com/spf13/cobra"
 )

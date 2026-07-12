@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"relo/internal/dag"
-	"relo/internal/domain"
+	"github.com/linrswa/relo/internal/dag"
+	"github.com/linrswa/relo/internal/domain"
 )
 
 func fixtureGraph() dag.Graph {

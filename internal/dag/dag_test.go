@@ -3,7 +3,7 @@ package dag
 import (
 	"testing"
 
-	"relo/internal/domain"
+	"github.com/linrswa/relo/internal/domain"
 )
 
 func TestReadyBlockedLayersAndCycle(t *testing.T) {

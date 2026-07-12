@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"relo/internal/dag"
-	"relo/internal/domain"
+	"github.com/linrswa/relo/internal/dag"
+	"github.com/linrswa/relo/internal/domain"
 )
 
 type GraphPayload struct {

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"relo/internal/dag"
-	"relo/internal/domain"
+	"github.com/linrswa/relo/internal/dag"
+	"github.com/linrswa/relo/internal/domain"
 )
 
 // MilestoneReadSnapshot is a consistent view of a milestone and its live
