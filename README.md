@@ -97,6 +97,20 @@ relo graph
 relo task ready --details
 ```
 
+`relo graph` renders the dependency tree and current execution frontier:
+
+```text
+🎯 Goal: Build the example service
+│
+└── 🔵 TASK-001  Create service model
+    └── ⏸ TASK-002  Add service API
+
+Running: none
+Ready:   TASK-001
+Blocked: TASK-002
+Failed:  none
+```
+
 Start and complete the ready work:
 
 ```bash
