@@ -10,12 +10,13 @@ relo project show [--json]
 relo version
 relo project update [--goal TEXT] [--prd PATH]
 relo project refresh-prd
+relo project remove --force
 relo validate
 relo graph [--format tree|json]
 relo status [--json]
 ```
 
-`init` creates `.relo/relo.db`. Other commands discover the nearest initialized parent directory.
+`init` creates `.relo/relo.db`. Other commands discover the nearest initialized parent directory. `project remove` is irreversible, requires `--force`, and must run from the project root. It removes only the relo-managed database and sidecars; the PRD, source files, and unknown `.relo` contents are preserved.
 
 ## Task definitions
 

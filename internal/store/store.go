@@ -85,6 +85,82 @@ func FindRoot(start string) (string, error) {
 }
 func DBPath(root string) string { return filepath.Join(root, ".relo", "relo.db") }
 
+type RemoveProjectResult struct {
+	Root               string
+	MetadataDirRemoved bool
+}
+
+// RemoveProjectState deletes only relo-managed database files. Unknown files
+// under .relo are preserved so a destructive project removal cannot erase
+// caller-owned data.
+func RemoveProjectState(root string) (RemoveProjectResult, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return RemoveProjectResult{}, err
+	}
+	metadataDir := filepath.Join(absRoot, ".relo")
+	st, err := os.Lstat(metadataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return RemoveProjectResult{}, validation("not an initialized relo project (missing .relo/relo.db)")
+		}
+		return RemoveProjectResult{}, err
+	}
+	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return RemoveProjectResult{}, validation("refusing to remove project state through non-directory %s", metadataDir)
+	}
+
+	dbPath := DBPath(absRoot)
+	st, err = os.Lstat(dbPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return RemoveProjectResult{}, validation("not an initialized relo project (missing .relo/relo.db)")
+		}
+		return RemoveProjectResult{}, err
+	}
+	if !st.Mode().IsRegular() {
+		return RemoveProjectResult{}, validation("refusing to remove non-regular database file %s", dbPath)
+	}
+
+	managedPaths := []string{dbPath + "-shm", dbPath + "-wal", dbPath}
+	existingPaths := make([]string, 0, len(managedPaths))
+	for _, path := range managedPaths {
+		st, err := os.Lstat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return RemoveProjectResult{}, err
+		}
+		if !st.Mode().IsRegular() {
+			return RemoveProjectResult{}, validation("refusing to remove non-regular database file %s", path)
+		}
+		existingPaths = append(existingPaths, path)
+	}
+	for _, path := range existingPaths {
+		if err := os.Remove(path); err != nil {
+			return RemoveProjectResult{}, err
+		}
+	}
+
+	result := RemoveProjectResult{Root: absRoot}
+	entries, err := os.ReadDir(metadataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			result.MetadataDirRemoved = true
+			return result, nil
+		}
+		return RemoveProjectResult{}, err
+	}
+	if len(entries) == 0 {
+		if err := os.Remove(metadataDir); err != nil && !os.IsNotExist(err) {
+			return RemoveProjectResult{}, err
+		}
+		result.MetadataDirRemoved = true
+	}
+	return result, nil
+}
+
 func HashFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {

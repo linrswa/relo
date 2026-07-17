@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/linrswa/relo/internal/domain"
@@ -159,7 +160,7 @@ func (a *app) initCmd() *cobra.Command {
 
 func (a *app) projectCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "project", Short: "Inspect and update project metadata", Long: "Project metadata records the goal and PRD path/hash."}
-	cmd.AddCommand(a.projectShowCmd(), a.projectUpdateCmd(), a.projectRefreshPRDCmd())
+	cmd.AddCommand(a.projectShowCmd(), a.projectUpdateCmd(), a.projectRefreshPRDCmd(), a.projectRemoveCmd())
 	return cmd
 }
 
@@ -237,6 +238,37 @@ func (a *app) projectRefreshPRDCmd() *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "Refreshed PRD hash\nPRD: %s\nOld hash: %s\nNew hash: %s\n", p.PRDPath, oldHash, newHash)
 		return nil
 	}}
+}
+
+func (a *app) projectRemoveCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{Use: "remove", Short: "Remove relo project state", Long: "Permanently remove the relo-managed database from the current project. Run this command from the project root. The PRD, source files, and unknown files under .relo are preserved.", Args: validationArgs(cobra.NoArgs), RunE: func(cmd *cobra.Command, args []string) error {
+		if !force {
+			return store.ValidationError{Message: "--force is required to permanently remove relo project state"}
+		}
+		root, err := store.FindRoot(".")
+		if err != nil {
+			return err
+		}
+		cwd, err := filepath.Abs(".")
+		if err != nil {
+			return err
+		}
+		if filepath.Clean(cwd) != filepath.Clean(root) {
+			return store.ValidationError{Message: fmt.Sprintf("project remove must run from the project root: %s", root)}
+		}
+		result, err := store.RemoveProjectState(root)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Removed relo project state at %s\n", result.Root)
+		if !result.MetadataDirRemoved {
+			fmt.Fprintf(cmd.OutOrStdout(), "Preserved non-empty metadata directory: %s\n", filepath.Join(result.Root, ".relo"))
+		}
+		return nil
+	}}
+	cmd.Flags().BoolVar(&force, "force", false, "confirm permanent removal of relo project state")
+	return cmd
 }
 
 func (a *app) graphCmd() *cobra.Command {

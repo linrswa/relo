@@ -31,6 +31,7 @@ Mutation commands require canonical task IDs such as `TASK-001`. Titles are allo
 - `relo project show [--json]`, `relo version`: inspect project metadata or print the build version.
 - `relo project update --goal "..." [--prd docs/prd.md]`: update project metadata; PRD paths are resolved from the project root and hashed atomically.
 - `relo project refresh-prd`: acknowledge current PRD contents by recomputing and storing the PRD hash; review tasks separately because refresh does not mutate them.
+- `relo project remove --force`: permanently remove the relo-managed database from the project root while preserving the PRD, source files, and unknown `.relo` contents. Use only when the user explicitly asks to remove project state.
 - `relo task create --title "..." --objective "..." --accept "..." [--priority N]`: create a task. At least one acceptance criterion is required. Lower priority numbers sort earlier; default is `100`.
 - `relo task dependency add TASK-ID DEP-ID... --reason "..."`: make `TASK-ID` wait for dependencies. Use `--reason-for DEP-ID=text` when each edge needs a different reason.
 - `relo task dependency remove TASK-ID DEP-ID... --reason "..."`: remove dependency edges.
