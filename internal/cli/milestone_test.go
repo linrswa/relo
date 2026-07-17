@@ -92,6 +92,15 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 	if got := strings.TrimSpace(must("milestone", "create", "--title", "M", "--reason", "R", "--anchor", "TASK-001", "--recommend", "one")); got != "MILESTONE-001" {
 		t.Fatalf("create = %q", got)
 	}
+	if got := must("graph"); strings.Contains(got, "MILESTONE-001") {
+		t.Fatalf("default graph unexpectedly changed contract: %s", got)
+	}
+	if got := must("graph", "--include-milestones"); !strings.Contains(got, "Milestone checkpoints (non-gating):") || !strings.Contains(got, "◇ MILESTONE-001  M [planned]") || !strings.Contains(got, "anchors: TASK-001") {
+		t.Fatalf("planned milestone overlay = %q", got)
+	}
+	if out, stderr := fail("graph", "--format", "json", "--include-milestones"); stderr != "" || !strings.Contains(out, `"code":"INVALID_ARGUMENT"`) || !strings.Contains(out, "supported only with --format tree") {
+		t.Fatalf("JSON milestone overlay rejection out=%s stderr=%s", out, stderr)
+	}
 
 	// Planned get has the full DTO, non-null arrays, and nullable mark fields.
 	data := envelopeData(t, must("milestone", "get", "MILESTONE-001", "--json"))
@@ -149,6 +158,9 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 		t.Fatalf("failed anchor batch changed anchors: %#v", got)
 	}
 	must("milestone", "anchor", "add", "MILESTONE-001", "TASK-002")
+	if got := must("graph", "--include-milestones"); !strings.Contains(got, "anchors:") || !strings.Contains(got, "TASK-001") || !strings.Contains(got, "TASK-002") {
+		t.Fatalf("multi-anchor milestone overlay = %q", got)
+	}
 	must("milestone", "anchor", "remove", "MILESTONE-001", "TASK-002")
 
 	// Task readiness is independent. Mark rejects pending scope, then succeeds
@@ -178,11 +190,17 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 	if out := must("status"); !strings.Contains(out, "Milestones ready to mark: MILESTONE-001") {
 		t.Fatalf("status human = %q", out)
 	}
+	if got := must("graph", "--include-milestones"); !strings.Contains(got, "◎ MILESTONE-001  M [ready_to_mark]") {
+		t.Fatalf("ready milestone overlay = %q", got)
+	}
 	// graph remains the pre-existing contract and never gains status-only data.
 	graph := envelopeData(t, must("graph", "--format", "json"))
 	graphSummary := graph["summary"].(map[string]any)
 	requireKeys(t, graphSummary, "running", "ready", "blocked", "failed")
 	must("milestone", "mark", "MILESTONE-001", "--summary", "reviewed", "--reference", "ref")
+	if got := must("graph", "--include-milestones"); !strings.Contains(got, "◆ MILESTONE-001  M [marked]") || !strings.Contains(got, "anchors: TASK-001") {
+		t.Fatalf("marked milestone overlay = %q", got)
+	}
 	marked := envelopeData(t, must("milestone", "get", "MILESTONE-001", "--json"))["milestone"].(map[string]any)
 	requireKeys(t, marked, "id", "title", "reason", "stored_status", "display_status", "anchors", "scope", "recommendations", "mark_summary", "reference", "created_at", "updated_at", "marked_at")
 	if marked["stored_status"] != "marked" || marked["display_status"] != "marked" || marked["mark_summary"] != "reviewed" || marked["reference"] != "ref" || marked["marked_at"] == nil || len(array(t, marked["anchors"])) != 1 {

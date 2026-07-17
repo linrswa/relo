@@ -273,7 +273,8 @@ func (a *app) projectRemoveCmd() *cobra.Command {
 
 func (a *app) graphCmd() *cobra.Command {
 	var format string
-	cmd := &cobra.Command{Use: "graph", Short: "Render the task dependency graph", RunE: func(cmd *cobra.Command, args []string) error {
+	var includeMilestones bool
+	cmd := &cobra.Command{Use: "graph", Short: "Render the task dependency graph", Long: "Render the task dependency graph. The optional milestone overlay shows anchor relationships as non-gating checkpoints, never as task dependencies.", RunE: func(cmd *cobra.Command, args []string) error {
 		jsonOut := format == "json"
 		if len(args) != 0 {
 			err := store.ValidationError{Message: fmt.Sprintf("accepts 0 arg(s), received %d", len(args))}
@@ -283,6 +284,11 @@ func (a *app) graphCmd() *cobra.Command {
 		if format != "tree" && format != "json" {
 			err := store.ValidationError{Message: "--format must be tree or json"}
 			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
+		}
+		if includeMilestones && jsonOut {
+			err := store.ValidationError{Message: "--include-milestones is supported only with --format tree"}
+			writeJSONError(cmd, true, "INVALID_ARGUMENT", err)
 			return err
 		}
 		s, err := a.open(cmd.Context())
@@ -313,10 +319,19 @@ func (a *app) graphCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Fprint(cmd.OutOrStdout(), out)
+		milestoneOverlay := ""
+		if includeMilestones {
+			milestones, err := s.ListMilestoneReadSnapshots(cmd.Context(), "")
+			if err != nil {
+				return err
+			}
+			milestoneOverlay = renderMilestoneGraphOverlay(milestones)
+		}
+		fmt.Fprint(cmd.OutOrStdout(), out, milestoneOverlay)
 		return nil
 	}}
 	cmd.Flags().StringVar(&format, "format", "tree", "tree or json output format")
+	cmd.Flags().BoolVar(&includeMilestones, "include-milestones", false, "append non-gating milestone checkpoints to tree output")
 	return cmd
 }
 
