@@ -369,38 +369,45 @@ func (s *Store) ListMilestoneReadSnapshots(ctx context.Context, status string) (
 	if status != "" && status != domain.MilestoneStatusPlanned && status != domain.MilestoneStatusMarked {
 		return nil, validation("milestone status must be planned or marked")
 	}
-	out := []MilestoneReadSnapshot{}
+	var out []MilestoneReadSnapshot
 	err := s.WithReadTx(ctx, func(tx *Tx) error {
-		q := `SELECT id FROM milestones`
-		args := []any{}
-		if status != "" {
-			q += ` WHERE status=?`
-			args = append(args, status)
-		}
-		q += ` ORDER BY creation_order,id`
-		rows, err := tx.tx.QueryContext(ctx, q, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return err
-			}
-			m, err := getMilestone(ctx, tx.tx, id)
-			if err != nil {
-				return err
-			}
-			snap := MilestoneReadSnapshot{Milestone: *m}
-			if err := populateMilestoneSnapshot(ctx, tx, &snap); err != nil {
-				return err
-			}
-			out = append(out, snap)
-		}
-		return rows.Err()
+		var err error
+		out, err = listMilestoneReadSnapshotsTx(ctx, tx, status)
+		return err
 	})
 	return out, err
+}
+
+func listMilestoneReadSnapshotsTx(ctx context.Context, tx *Tx, status string) ([]MilestoneReadSnapshot, error) {
+	out := []MilestoneReadSnapshot{}
+	q := `SELECT id FROM milestones`
+	args := []any{}
+	if status != "" {
+		q += ` WHERE status=?`
+		args = append(args, status)
+	}
+	q += ` ORDER BY creation_order,id`
+	rows, err := tx.tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		m, err := getMilestone(ctx, tx.tx, id)
+		if err != nil {
+			return nil, err
+		}
+		snap := MilestoneReadSnapshot{Milestone: *m}
+		if err := populateMilestoneSnapshot(ctx, tx, &snap); err != nil {
+			return nil, err
+		}
+		out = append(out, snap)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ReadyMilestones(ctx context.Context) ([]MilestoneReadSnapshot, error) {

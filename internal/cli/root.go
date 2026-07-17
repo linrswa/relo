@@ -262,8 +262,8 @@ func (a *app) projectRemoveCmd() *cobra.Command {
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Removed relo project state at %s\n", result.Root)
-		if !result.MetadataDirRemoved {
-			fmt.Fprintf(cmd.OutOrStdout(), "Preserved non-empty metadata directory: %s\n", filepath.Join(result.Root, ".relo"))
+		if result.UnknownMetadataPreserved {
+			fmt.Fprintf(cmd.OutOrStdout(), "Preserved unknown files in metadata directory: %s\n", filepath.Join(result.Root, ".relo"))
 		}
 		return nil
 	}}
@@ -297,35 +297,27 @@ func (a *app) graphCmd() *cobra.Command {
 			return err
 		}
 		defer s.Close()
-		p, err := s.Project(cmd.Context())
+		snapshot, err := s.GraphReadSnapshot(cmd.Context(), includeMilestones)
 		if err != nil {
 			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
-		g, err := s.Graph(cmd.Context())
-		if err != nil {
-			writeJSONError(cmd, jsonOut, "", err)
-			return err
-		}
+		g := snapshot.Graph
 		if c := g.Cycle(); len(c) > 0 {
 			err := store.ValidationError{Message: "dependency graph has cycle: " + strings.Join(c, " -> ")}
 			writeJSONError(cmd, jsonOut, "VALIDATION_ERROR", err)
 			return err
 		}
 		if jsonOut {
-			return writeJSONOK(cmd, render.Payload(p.Goal, g))
+			return writeJSONOK(cmd, render.Payload(snapshot.Project.Goal, g))
 		}
-		out, err := render.Tree(p.Goal, g)
+		out, err := render.Tree(snapshot.Project.Goal, g)
 		if err != nil {
 			return err
 		}
 		milestoneOverlay := ""
 		if includeMilestones {
-			milestones, err := s.ListMilestoneReadSnapshots(cmd.Context(), "")
-			if err != nil {
-				return err
-			}
-			milestoneOverlay = renderMilestoneGraphOverlay(milestones)
+			milestoneOverlay = renderMilestoneGraphOverlay(snapshot.Milestones)
 		}
 		fmt.Fprint(cmd.OutOrStdout(), out, milestoneOverlay)
 		return nil

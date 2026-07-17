@@ -14,6 +14,7 @@ import (
 
 	"github.com/linrswa/relo/internal/domain"
 
+	"github.com/gofrs/flock"
 	_ "modernc.org/sqlite"
 )
 
@@ -29,10 +30,12 @@ const currentSchemaVersion = 2
 type Store struct {
 	db   *sql.DB
 	root string
+	lock *flock.Flock
 
-	// testAfterWriteLock is used only by package tests to deterministically
-	// coordinate competing writers after BEGIN IMMEDIATE has acquired its lock.
+	// Test hooks are used only by package tests to deterministically coordinate
+	// operations after a transaction has established its database snapshot.
 	testAfterWriteLock func()
+	testAfterGraphRead func()
 }
 
 type Tx struct{ tx *sql.Tx }
@@ -54,18 +57,55 @@ func (s *Store) WithReadTx(ctx context.Context, fn func(*Tx) error) error {
 }
 
 func Open(path string) (*Store, error) {
+	return open(path, false)
+}
+
+func open(path string, create bool) (*Store, error) {
+	root := filepath.Dir(filepath.Dir(path))
+	projectLock := flock.New(LockPath(root))
+	locked, err := projectLock.TryRLock()
+	if err != nil {
+		_ = projectLock.Close()
+		return nil, err
+	}
+	if !locked {
+		_ = projectLock.Close()
+		return nil, validation("relo project state is locked for removal")
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		if !os.IsNotExist(err) || !create {
+			_ = projectLock.Close()
+			if os.IsNotExist(err) {
+				return nil, validation("not an initialized relo project (missing .relo/relo.db)")
+			}
+			return nil, err
+		}
+	} else if !st.Mode().IsRegular() {
+		_ = projectLock.Close()
+		return nil, validation("refusing to open non-regular database file %s", path)
+	}
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		_ = projectLock.Close()
 		return nil, err
 	}
 	if _, err := db.Exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;`); err != nil {
-		db.Close()
+		_ = db.Close()
+		_ = projectLock.Close()
 		return nil, err
 	}
-	return &Store{db: db, root: filepath.Dir(filepath.Dir(path))}, nil
+	return &Store{db: db, root: root, lock: projectLock}, nil
 }
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	dbErr := s.db.Close()
+	lockErr := s.lock.Close()
+	if dbErr != nil {
+		return dbErr
+	}
+	return lockErr
+}
 
 func FindRoot(start string) (string, error) {
 	dir, err := filepath.Abs(start)
@@ -83,11 +123,12 @@ func FindRoot(start string) (string, error) {
 		dir = parent
 	}
 }
-func DBPath(root string) string { return filepath.Join(root, ".relo", "relo.db") }
+func DBPath(root string) string   { return filepath.Join(root, ".relo", "relo.db") }
+func LockPath(root string) string { return filepath.Join(root, ".relo", "relo.lock") }
 
 type RemoveProjectResult struct {
-	Root               string
-	MetadataDirRemoved bool
+	Root                     string
+	UnknownMetadataPreserved bool
 }
 
 // RemoveProjectState deletes only relo-managed database files. Unknown files
@@ -110,25 +151,40 @@ func RemoveProjectState(root string) (RemoveProjectResult, error) {
 		return RemoveProjectResult{}, validation("refusing to remove project state through non-directory %s", metadataDir)
 	}
 
-	dbPath := DBPath(absRoot)
-	st, err = os.Lstat(dbPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return RemoveProjectResult{}, validation("not an initialized relo project (missing .relo/relo.db)")
-		}
+	lockPath := LockPath(absRoot)
+	if st, err := os.Lstat(lockPath); err == nil && !st.Mode().IsRegular() {
+		return RemoveProjectResult{}, validation("refusing to use non-regular project lock %s", lockPath)
+	} else if err != nil && !os.IsNotExist(err) {
 		return RemoveProjectResult{}, err
 	}
-	if !st.Mode().IsRegular() {
-		return RemoveProjectResult{}, validation("refusing to remove non-regular database file %s", dbPath)
+	projectLock := flock.New(lockPath)
+	locked, err := projectLock.TryLock()
+	if err != nil {
+		_ = projectLock.Close()
+		return RemoveProjectResult{}, err
 	}
+	if !locked {
+		_ = projectLock.Close()
+		return RemoveProjectResult{}, validation("relo project is in use; close other relo commands before removing it")
+	}
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			_ = projectLock.Close()
+		}
+	}()
 
-	managedPaths := []string{dbPath + "-shm", dbPath + "-wal", dbPath}
+	dbPath := DBPath(absRoot)
+	managedPaths := []string{dbPath, dbPath + "-shm", dbPath + "-wal"}
 	existingPaths := make([]string, 0, len(managedPaths))
 	for _, path := range managedPaths {
 		st, err := os.Lstat(path)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if os.IsNotExist(err) && path != dbPath {
 				continue
+			}
+			if os.IsNotExist(err) {
+				return RemoveProjectResult{}, validation("not an initialized relo project (missing .relo/relo.db)")
 			}
 			return RemoveProjectResult{}, err
 		}
@@ -137,26 +193,50 @@ func RemoveProjectState(root string) (RemoveProjectResult, error) {
 		}
 		existingPaths = append(existingPaths, path)
 	}
+
+	stagingDir, err := os.MkdirTemp(metadataDir, ".remove-")
+	if err != nil {
+		return RemoveProjectResult{}, err
+	}
+	movedPaths := make([]string, 0, len(existingPaths))
 	for _, path := range existingPaths {
-		if err := os.Remove(path); err != nil {
+		target := filepath.Join(stagingDir, filepath.Base(path))
+		if err := os.Rename(path, target); err != nil {
+			var rollbackErrs []error
+			for i := len(movedPaths) - 1; i >= 0; i-- {
+				moved := movedPaths[i]
+				if rollbackErr := os.Rename(filepath.Join(stagingDir, filepath.Base(moved)), moved); rollbackErr != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore %s: %w", moved, rollbackErr))
+				}
+			}
+			if cleanupErr := os.Remove(stagingDir); cleanupErr != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("remove recovery directory %s: %w", stagingDir, cleanupErr))
+			}
+			if len(rollbackErrs) > 0 {
+				return RemoveProjectResult{}, fmt.Errorf("stage %s for removal: %w; rollback incomplete: %v; recover remaining files from %s", path, err, errors.Join(rollbackErrs...), stagingDir)
+			}
 			return RemoveProjectResult{}, err
 		}
+		movedPaths = append(movedPaths, path)
 	}
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return RemoveProjectResult{}, err
+	}
+	if err := projectLock.Close(); err != nil {
+		return RemoveProjectResult{}, err
+	}
+	lockHeld = false
 
 	result := RemoveProjectResult{Root: absRoot}
 	entries, err := os.ReadDir(metadataDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			result.MetadataDirRemoved = true
-			return result, nil
-		}
 		return RemoveProjectResult{}, err
 	}
-	if len(entries) == 0 {
-		if err := os.Remove(metadataDir); err != nil && !os.IsNotExist(err) {
-			return RemoveProjectResult{}, err
+	for _, entry := range entries {
+		if entry.Name() != filepath.Base(lockPath) {
+			result.UnknownMetadataPreserved = true
+			break
 		}
-		result.MetadataDirRemoved = true
 	}
 	return result, nil
 }
@@ -206,7 +286,7 @@ func InitProject(ctx context.Context, root, prd, goal string) (*domain.Project, 
 	if err := os.MkdirAll(filepath.Join(absRoot, ".relo"), 0755); err != nil {
 		return nil, err
 	}
-	s, err := Open(DBPath(absRoot))
+	s, err := open(DBPath(absRoot), true)
 	if err != nil {
 		return nil, err
 	}
