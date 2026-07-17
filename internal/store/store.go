@@ -135,6 +135,10 @@ type RemoveProjectResult struct {
 // under .relo are preserved so a destructive project removal cannot erase
 // caller-owned data.
 func RemoveProjectState(root string) (RemoveProjectResult, error) {
+	return removeProjectState(root, os.RemoveAll)
+}
+
+func removeProjectState(root string, removeAll func(string) error) (RemoveProjectResult, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return RemoveProjectResult{}, err
@@ -219,8 +223,8 @@ func RemoveProjectState(root string) (RemoveProjectResult, error) {
 		}
 		movedPaths = append(movedPaths, path)
 	}
-	if err := os.RemoveAll(stagingDir); err != nil {
-		return RemoveProjectResult{}, err
+	if err := removeAll(stagingDir); err != nil {
+		return RemoveProjectResult{}, fmt.Errorf("relo project state removal is incomplete: managed files were moved out of service, but cleanup failed; inspect and remove recovery directory %s before reinitializing: %w", stagingDir, err)
 	}
 	if err := projectLock.Close(); err != nil {
 		return RemoveProjectResult{}, err
