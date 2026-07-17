@@ -58,12 +58,11 @@ func milestoneDisplay(s store.MilestoneReadSnapshot) string {
 }
 
 func renderMilestoneGraphOverlay(snapshots []store.MilestoneReadSnapshot) string {
+	if len(snapshots) == 0 {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("\nMilestone checkpoints (non-gating):\n")
-	if len(snapshots) == 0 {
-		b.WriteString("none\n")
-		return b.String()
-	}
 	for i, snapshot := range snapshots {
 		connector := "├──"
 		anchorPrefix := "│  "

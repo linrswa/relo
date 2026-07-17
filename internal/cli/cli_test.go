@@ -419,6 +419,9 @@ func TestCLIGraphTreeAndJSON(t *testing.T) {
 			t.Fatalf("graph output missing %q:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "Milestone checkpoints") {
+		t.Fatalf("graph without milestones has an empty checkpoint section:\n%s", out)
+	}
 	out2, stderr, err := run(t, root, "graph", "--format", "tree")
 	if err != nil || out2 != out {
 		t.Fatalf("graph tree not deterministic out=%s out2=%s stderr=%s err=%v", out, out2, stderr, err)

@@ -273,8 +273,8 @@ func (a *app) projectRemoveCmd() *cobra.Command {
 
 func (a *app) graphCmd() *cobra.Command {
 	var format string
-	var includeMilestones bool
-	cmd := &cobra.Command{Use: "graph", Short: "Render the task dependency graph", Long: "Render the task dependency graph. The optional milestone overlay shows anchor relationships as non-gating checkpoints, never as task dependencies.", RunE: func(cmd *cobra.Command, args []string) error {
+	var tasksOnly, allMilestones bool
+	cmd := &cobra.Command{Use: "graph", Short: "Render the task dependency graph", Long: "Render the task dependency graph. Tree output includes active milestone anchor relationships as non-gating checkpoints by default; milestones never become task dependencies. JSON remains task-only.", RunE: func(cmd *cobra.Command, args []string) error {
 		jsonOut := format == "json"
 		if len(args) != 0 {
 			err := store.ValidationError{Message: fmt.Sprintf("accepts 0 arg(s), received %d", len(args))}
@@ -286,18 +286,28 @@ func (a *app) graphCmd() *cobra.Command {
 			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
 			return err
 		}
-		if includeMilestones && jsonOut {
-			err := store.ValidationError{Message: "--include-milestones is supported only with --format tree"}
+		if tasksOnly && allMilestones {
+			err := store.ValidationError{Message: "--tasks-only and --all-milestones cannot be combined"}
+			writeJSONError(cmd, jsonOut, "INVALID_ARGUMENT", err)
+			return err
+		}
+		if jsonOut && (tasksOnly || allMilestones) {
+			flag := "--tasks-only"
+			if allMilestones {
+				flag = "--all-milestones"
+			}
+			err := store.ValidationError{Message: flag + " is supported only with --format tree"}
 			writeJSONError(cmd, true, "INVALID_ARGUMENT", err)
 			return err
 		}
+		includeMilestones := !jsonOut && !tasksOnly
 		s, err := a.open(cmd.Context())
 		if err != nil {
 			writeJSONError(cmd, jsonOut, "", err)
 			return err
 		}
 		defer s.Close()
-		snapshot, err := s.GraphReadSnapshot(cmd.Context(), includeMilestones)
+		snapshot, err := s.GraphReadSnapshot(cmd.Context(), includeMilestones, allMilestones)
 		if err != nil {
 			writeJSONError(cmd, jsonOut, "", err)
 			return err
@@ -323,7 +333,8 @@ func (a *app) graphCmd() *cobra.Command {
 		return nil
 	}}
 	cmd.Flags().StringVar(&format, "format", "tree", "tree or json output format")
-	cmd.Flags().BoolVar(&includeMilestones, "include-milestones", false, "append non-gating milestone checkpoints to tree output")
+	cmd.Flags().BoolVar(&tasksOnly, "tasks-only", false, "omit milestone checkpoints from tree output")
+	cmd.Flags().BoolVar(&allMilestones, "all-milestones", false, "include marked milestone history in tree output")
 	return cmd
 }
 
