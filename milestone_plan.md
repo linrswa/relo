@@ -867,7 +867,7 @@ JSON status 在既有 `data.summary` 內增加 non-null array：
 
 ### 12.2 Graph
 
-MVP 不把 Milestone 混入 task tree。`relo graph` 繼續只呈現 dependency DAG，避免 checkpoint marker 被誤讀為 task node 或 barrier。
+Human-readable tree output 在 task dependency tree 後加入獨立的 non-gating checkpoint overlay，預設呈現 planned 與 ready milestones；`--all-milestones` 另含 marked history，`--tasks-only` 可只呈現 task tree。Milestone 不會成為 task node、dependency edge 或 dispatch barrier，`relo graph --format json` 仍維持純 task DAG contract。
 
 ### 12.3 Validate
 

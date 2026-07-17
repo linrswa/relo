@@ -151,6 +151,49 @@ func TestRemoveProjectStateDeletesManagedFilesAndPreservesUnknownFiles(t *testin
 	}
 }
 
+func TestRemoveProjectStateReportsIncompleteCleanupAndRecoveryPath(t *testing.T) {
+	s, root := newProject(t)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := DBPath(root)
+	for _, path := range []string{dbPath + "-shm", dbPath + "-wal"} {
+		if err := os.WriteFile(path, []byte("sidecar"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var recoveryDir string
+	_, err := removeProjectState(root, func(path string) error {
+		recoveryDir = path
+		if err := os.Remove(filepath.Join(path, filepath.Base(dbPath))); err != nil {
+			t.Fatalf("inject partial cleanup: %v", err)
+		}
+		return errors.New("injected cleanup failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "removal is incomplete") || !strings.Contains(err.Error(), recoveryDir) || !strings.Contains(err.Error(), "before reinitializing") {
+		t.Fatalf("incomplete cleanup error = %v, recovery directory = %q", err, recoveryDir)
+	}
+	if recoveryDir == "" {
+		t.Fatal("cleanup did not receive recovery directory")
+	}
+	for _, path := range []string{dbPath, dbPath + "-shm", dbPath + "-wal"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("managed file remains in service after staging at %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(recoveryDir, filepath.Base(dbPath))); !os.IsNotExist(err) {
+		t.Fatalf("injected partial cleanup did not remove staged database: %v", err)
+	}
+	for _, path := range []string{dbPath + "-shm", dbPath + "-wal"} {
+		if _, err := os.Stat(filepath.Join(recoveryDir, filepath.Base(path))); err != nil {
+			t.Fatalf("error did not identify remaining staged file %s: %v", path, err)
+		}
+	}
+	if err := os.RemoveAll(recoveryDir); err != nil {
+		t.Fatalf("finish recovery cleanup: %v", err)
+	}
+}
+
 func TestRemoveProjectStateRejectsActiveStoreWithoutChangingFiles(t *testing.T) {
 	s, root := newProject(t)
 	defer s.Close()
