@@ -421,6 +421,15 @@ type ReadyReadSnapshot struct {
 	Tasks []domain.Task
 }
 
+// GraphReadSnapshot contains every database-backed value rendered by graph.
+// It is intentionally assembled in one read transaction so task states and
+// milestone readiness cannot come from different commits.
+type GraphReadSnapshot struct {
+	Project    domain.Project
+	Graph      dag.Graph
+	Milestones []MilestoneReadSnapshot
+}
+
 // StatusReadSnapshot contains every database-backed value rendered by status.
 // It is intentionally assembled in one read transaction.
 type StatusReadSnapshot struct {
@@ -436,6 +445,33 @@ func (s *Store) Graph(ctx context.Context) (dag.Graph, error) {
 		return err
 	})
 	return g, err
+}
+
+func (s *Store) GraphReadSnapshot(ctx context.Context, includeMilestones bool) (GraphReadSnapshot, error) {
+	var snap GraphReadSnapshot
+	err := s.WithReadTx(ctx, func(tx *Tx) error {
+		project, err := tx.Project(ctx)
+		if err != nil {
+			return err
+		}
+		graph, err := tx.graph(ctx)
+		if err != nil {
+			return err
+		}
+		snap.Project = *project
+		snap.Graph = graph
+		if includeMilestones {
+			if s.testAfterGraphRead != nil {
+				s.testAfterGraphRead()
+			}
+			snap.Milestones, err = listMilestoneReadSnapshotsTx(ctx, tx, "")
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return snap, err
 }
 
 func (s *Store) TaskReadSnapshot(ctx context.Context, id string) (TaskReadSnapshot, error) {

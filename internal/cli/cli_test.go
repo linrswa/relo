@@ -215,7 +215,7 @@ func TestCLIProjectRemoveRequiresForceAndProjectRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("remove failed: out=%s stderr=%s err=%v", out, stderr, err)
 	}
-	if !strings.Contains(out, "Removed relo project state at "+root) || !strings.Contains(out, "Preserved non-empty metadata directory") {
+	if !strings.Contains(out, "Removed relo project state at "+root) || !strings.Contains(out, "Preserved unknown files in metadata directory") {
 		t.Fatalf("unexpected remove output: %s", out)
 	}
 	if _, err := os.Stat(filepath.Join(metadataDir, "relo.db")); !os.IsNotExist(err) {

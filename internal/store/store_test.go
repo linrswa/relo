@@ -132,7 +132,7 @@ func TestRemoveProjectStateDeletesManagedFilesAndPreservesUnknownFiles(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Root != root || result.MetadataDirRemoved {
+	if result.Root != root || !result.UnknownMetadataPreserved {
 		t.Fatalf("unexpected removal result: %#v", result)
 	}
 	for _, path := range []string{dbPath, dbPath + "-shm", dbPath + "-wal"} {
@@ -151,7 +151,42 @@ func TestRemoveProjectStateDeletesManagedFilesAndPreservesUnknownFiles(t *testin
 	}
 }
 
-func TestRemoveProjectStateRemovesEmptyMetadataDirectory(t *testing.T) {
+func TestRemoveProjectStateRejectsActiveStoreWithoutChangingFiles(t *testing.T) {
+	s, root := newProject(t)
+	defer s.Close()
+	dbPath := DBPath(root)
+	if _, err := RemoveProjectState(root); err == nil || !strings.Contains(err.Error(), "project is in use") {
+		t.Fatalf("active project removal error = %v", err)
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("active project removal changed database: %v", err)
+	}
+}
+
+func TestRemoveProjectStateRejectsNonRegularManagedFileAtomically(t *testing.T) {
+	s, root := newProject(t)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := DBPath(root)
+	shmPath, walPath := dbPath+"-shm", dbPath+"-wal"
+	if err := os.WriteFile(shmPath, []byte("sidecar"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(walPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RemoveProjectState(root); err == nil || !strings.Contains(err.Error(), "non-regular database file") {
+		t.Fatalf("non-regular sidecar removal error = %v", err)
+	}
+	for _, path := range []string{dbPath, shmPath, walPath} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("atomic refusal changed %s: %v", path, err)
+		}
+	}
+}
+
+func TestRemoveProjectStateKeepsStableLockFile(t *testing.T) {
 	s, root := newProject(t)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -160,11 +195,65 @@ func TestRemoveProjectStateRemovesEmptyMetadataDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.MetadataDirRemoved {
-		t.Fatalf("metadata directory not reported removed: %#v", result)
+	if result.UnknownMetadataPreserved {
+		t.Fatalf("unexpected unknown metadata: %#v", result)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".relo")); !os.IsNotExist(err) {
-		t.Fatalf("metadata directory remains: %v", err)
+	entries, err := os.ReadDir(filepath.Join(root, ".relo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(LockPath(root)) {
+		t.Fatalf("metadata entries = %v, want stable lock only", entries)
+	}
+	if reopened, err := Open(DBPath(root)); err == nil {
+		reopened.Close()
+		t.Fatal("open existing recreated a database after project removal")
+	}
+	if _, err := os.Stat(DBPath(root)); !os.IsNotExist(err) {
+		t.Fatalf("delayed open recreated database: %v", err)
+	}
+}
+
+func TestGraphReadSnapshotUsesOneDatabaseSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newProject(t)
+	defer s.Close()
+	task := createTaskForRuntime(t, ctx, s, "task")
+	if _, err := s.CreateMilestone(ctx, "checkpoint", "reason", []string{task}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartTasks(ctx, []string{task}); err != nil {
+		t.Fatal(err)
+	}
+
+	graphRead, releaseRead := make(chan struct{}), make(chan struct{})
+	s.testAfterGraphRead = func() {
+		close(graphRead)
+		<-releaseRead
+	}
+	type result struct {
+		snapshot GraphReadSnapshot
+		err      error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		snapshot, err := s.GraphReadSnapshot(ctx, true)
+		resultCh <- result{snapshot, err}
+	}()
+	<-graphRead
+	if err := s.PassTask(ctx, task, "done"); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseRead)
+	got := <-resultCh
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.snapshot.Project.Goal != "goal" || got.snapshot.Graph.Tasks[task].Status != "running" {
+		t.Fatalf("graph snapshot = %#v", got.snapshot)
+	}
+	if len(got.snapshot.Milestones) != 1 || got.snapshot.Milestones[0].ReadyToMark || got.snapshot.Milestones[0].Anchors[0].Status != "running" {
+		t.Fatalf("milestone came from a different commit: %#v", got.snapshot.Milestones)
 	}
 }
 
@@ -264,7 +353,7 @@ func TestMigrateV1PreservesDataAndV2IsNoOp(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".relo"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(DBPath(root))
+	s, err := open(DBPath(root), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +424,7 @@ func TestMigrateV2FailureRollsBackSchemaAndVersion(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".relo"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(DBPath(root))
+	s, err := open(DBPath(root), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +544,7 @@ func TestMigrateRejectsUnsupportedFutureVersion(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".relo"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(DBPath(root))
+	s, err := open(DBPath(root), true)
 	if err != nil {
 		t.Fatal(err)
 	}
