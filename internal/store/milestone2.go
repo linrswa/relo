@@ -447,7 +447,7 @@ func (s *Store) Graph(ctx context.Context) (dag.Graph, error) {
 	return g, err
 }
 
-func (s *Store) GraphReadSnapshot(ctx context.Context, includeMilestones bool) (GraphReadSnapshot, error) {
+func (s *Store) GraphReadSnapshot(ctx context.Context, includeMilestones, includeMarked bool) (GraphReadSnapshot, error) {
 	var snap GraphReadSnapshot
 	err := s.WithReadTx(ctx, func(tx *Tx) error {
 		project, err := tx.Project(ctx)
@@ -464,7 +464,11 @@ func (s *Store) GraphReadSnapshot(ctx context.Context, includeMilestones bool) (
 			if s.testAfterGraphRead != nil {
 				s.testAfterGraphRead()
 			}
-			snap.Milestones, err = listMilestoneReadSnapshotsTx(ctx, tx, "")
+			status := domain.MilestoneStatusPlanned
+			if includeMarked {
+				status = ""
+			}
+			snap.Milestones, err = listMilestoneReadSnapshotsTx(ctx, tx, status)
 			if err != nil {
 				return err
 			}

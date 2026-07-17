@@ -219,7 +219,8 @@ func TestGraphReadSnapshotUsesOneDatabaseSnapshot(t *testing.T) {
 	s, _ := newProject(t)
 	defer s.Close()
 	task := createTaskForRuntime(t, ctx, s, "task")
-	if _, err := s.CreateMilestone(ctx, "checkpoint", "reason", []string{task}, nil); err != nil {
+	milestone, err := s.CreateMilestone(ctx, "checkpoint", "reason", []string{task}, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.StartTasks(ctx, []string{task}); err != nil {
@@ -237,7 +238,7 @@ func TestGraphReadSnapshotUsesOneDatabaseSnapshot(t *testing.T) {
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		snapshot, err := s.GraphReadSnapshot(ctx, true)
+		snapshot, err := s.GraphReadSnapshot(ctx, true, false)
 		resultCh <- result{snapshot, err}
 	}()
 	<-graphRead
@@ -254,6 +255,30 @@ func TestGraphReadSnapshotUsesOneDatabaseSnapshot(t *testing.T) {
 	}
 	if len(got.snapshot.Milestones) != 1 || got.snapshot.Milestones[0].ReadyToMark || got.snapshot.Milestones[0].Anchors[0].Status != "running" {
 		t.Fatalf("milestone came from a different commit: %#v", got.snapshot.Milestones)
+	}
+
+	s.testAfterGraphRead = nil
+	if err := s.MarkMilestone(ctx, milestone, "reviewed", ""); err != nil {
+		t.Fatal(err)
+	}
+	extra := createTaskForRuntime(t, ctx, s, "extra")
+	planned, err := s.CreateMilestone(ctx, "later", "reason", []string{extra}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := s.GraphReadSnapshot(ctx, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active.Milestones) != 1 || active.Milestones[0].Milestone.ID != planned {
+		t.Fatalf("active milestone snapshot = %#v", active.Milestones)
+	}
+	all, err := s.GraphReadSnapshot(ctx, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Milestones) != 2 || all.Milestones[0].Milestone.ID != milestone || all.Milestones[1].Milestone.ID != planned {
+		t.Fatalf("all milestone snapshot = %#v", all.Milestones)
 	}
 }
 

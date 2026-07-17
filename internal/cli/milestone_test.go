@@ -92,14 +92,20 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 	if got := strings.TrimSpace(must("milestone", "create", "--title", "M", "--reason", "R", "--anchor", "TASK-001", "--recommend", "one")); got != "MILESTONE-001" {
 		t.Fatalf("create = %q", got)
 	}
-	if got := must("graph"); strings.Contains(got, "MILESTONE-001") {
-		t.Fatalf("default graph unexpectedly changed contract: %s", got)
+	if got := must("graph"); !strings.Contains(got, "Milestone checkpoints (non-gating):") || !strings.Contains(got, "◇ MILESTONE-001  M [planned]") || !strings.Contains(got, "anchors: TASK-001") {
+		t.Fatalf("default planned milestone overlay = %q", got)
 	}
-	if got := must("graph", "--include-milestones"); !strings.Contains(got, "Milestone checkpoints (non-gating):") || !strings.Contains(got, "◇ MILESTONE-001  M [planned]") || !strings.Contains(got, "anchors: TASK-001") {
-		t.Fatalf("planned milestone overlay = %q", got)
+	if got := must("graph", "--tasks-only"); strings.Contains(got, "Milestone checkpoints") || strings.Contains(got, "MILESTONE-001") {
+		t.Fatalf("tasks-only graph contains milestone overlay: %s", got)
 	}
-	if out, stderr := fail("graph", "--format", "json", "--include-milestones"); stderr != "" || !strings.Contains(out, `"code":"INVALID_ARGUMENT"`) || !strings.Contains(out, "supported only with --format tree") {
-		t.Fatalf("JSON milestone overlay rejection out=%s stderr=%s", out, stderr)
+	if out, stderr := fail("graph", "--format", "json", "--all-milestones"); stderr != "" || !strings.Contains(out, `"code":"INVALID_ARGUMENT"`) || !strings.Contains(out, "supported only with --format tree") {
+		t.Fatalf("JSON all-milestones rejection out=%s stderr=%s", out, stderr)
+	}
+	if out, stderr := fail("graph", "--format", "json", "--tasks-only"); stderr != "" || !strings.Contains(out, `"code":"INVALID_ARGUMENT"`) || !strings.Contains(out, "supported only with --format tree") {
+		t.Fatalf("JSON tasks-only rejection out=%s stderr=%s", out, stderr)
+	}
+	if _, stderr := fail("graph", "--tasks-only", "--all-milestones"); !strings.Contains(stderr, "cannot be combined") {
+		t.Fatalf("mutually exclusive graph flags stderr=%s", stderr)
 	}
 
 	// Planned get has the full DTO, non-null arrays, and nullable mark fields.
@@ -158,7 +164,7 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 		t.Fatalf("failed anchor batch changed anchors: %#v", got)
 	}
 	must("milestone", "anchor", "add", "MILESTONE-001", "TASK-002")
-	if got := must("graph", "--include-milestones"); !strings.Contains(got, "anchors:") || !strings.Contains(got, "TASK-001") || !strings.Contains(got, "TASK-002") {
+	if got := must("graph"); !strings.Contains(got, "anchors:") || !strings.Contains(got, "TASK-001") || !strings.Contains(got, "TASK-002") {
 		t.Fatalf("multi-anchor milestone overlay = %q", got)
 	}
 	must("milestone", "anchor", "remove", "MILESTONE-001", "TASK-002")
@@ -190,16 +196,24 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 	if out := must("status"); !strings.Contains(out, "Milestones ready to mark: MILESTONE-001") {
 		t.Fatalf("status human = %q", out)
 	}
-	if got := must("graph", "--include-milestones"); !strings.Contains(got, "◎ MILESTONE-001  M [ready_to_mark]") {
+	if got := must("graph"); !strings.Contains(got, "◎ MILESTONE-001  M [ready_to_mark]") {
 		t.Fatalf("ready milestone overlay = %q", got)
 	}
-	// graph remains the pre-existing contract and never gains status-only data.
-	graph := envelopeData(t, must("graph", "--format", "json"))
+	// graph JSON remains the pre-existing task-only contract.
+	graphJSON := must("graph", "--format", "json")
+	if strings.Contains(graphJSON, "MILESTONE") || strings.Contains(graphJSON, "milestone") {
+		t.Fatalf("graph JSON gained milestone data: %s", graphJSON)
+	}
+	graph := envelopeData(t, graphJSON)
+	requireKeys(t, graph, "project_goal", "nodes", "edges", "summary")
 	graphSummary := graph["summary"].(map[string]any)
 	requireKeys(t, graphSummary, "running", "ready", "blocked", "failed")
 	must("milestone", "mark", "MILESTONE-001", "--summary", "reviewed", "--reference", "ref")
-	if got := must("graph", "--include-milestones"); !strings.Contains(got, "◆ MILESTONE-001  M [marked]") || !strings.Contains(got, "anchors: TASK-001") {
-		t.Fatalf("marked milestone overlay = %q", got)
+	if got := must("graph"); strings.Contains(got, "Milestone checkpoints") || strings.Contains(got, "MILESTONE-001") {
+		t.Fatalf("default graph contains marked history: %q", got)
+	}
+	if got := must("graph", "--all-milestones"); !strings.Contains(got, "◆ MILESTONE-001  M [marked]") || !strings.Contains(got, "anchors: TASK-001") {
+		t.Fatalf("all-milestones marked overlay = %q", got)
 	}
 	marked := envelopeData(t, must("milestone", "get", "MILESTONE-001", "--json"))["milestone"].(map[string]any)
 	requireKeys(t, marked, "id", "title", "reason", "stored_status", "display_status", "anchors", "scope", "recommendations", "mark_summary", "reference", "created_at", "updated_at", "marked_at")
@@ -216,6 +230,12 @@ func TestCLIMilestoneJSONContractsAndMutations(t *testing.T) {
 	}
 	if got := strings.TrimSpace(must("milestone", "create", "--title", "later", "--reason", "R", "--anchor", "TASK-002")); got != "MILESTONE-002" {
 		t.Fatalf("second milestone = %q", got)
+	}
+	if got := must("graph"); strings.Contains(got, "MILESTONE-001") || !strings.Contains(got, "◇ MILESTONE-002  later [planned]") {
+		t.Fatalf("default graph did not isolate active milestone: %q", got)
+	}
+	if got := must("graph", "--all-milestones"); !strings.Contains(got, "◆ MILESTONE-001  M [marked]") || !strings.Contains(got, "◇ MILESTONE-002  later [planned]") {
+		t.Fatalf("all-milestones graph did not include active and marked: %q", got)
 	}
 	ordered := array(t, envelopeData(t, must("milestone", "list", "--json"))["milestones"])
 	if len(ordered) != 2 || ordered[0].(map[string]any)["id"] != "MILESTONE-001" || ordered[1].(map[string]any)["id"] != "MILESTONE-002" {

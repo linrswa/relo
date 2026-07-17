@@ -33,7 +33,7 @@ relo graph
 relo validate
 ```
 
-   When milestones exist and their anchor placement matters, also run `relo graph --include-milestones`. Treat the resulting checkpoint overlay as informational; it never changes task-DAG legality.
+   Human graph output already includes active milestone anchors. Use `relo graph --all-milestones` only when marked history matters, and always treat checkpoint overlays as informational rather than task-DAG legality.
 
 5. For a new project, confirm that the PRD exists and the goal is clear, then initialize it:
 
