@@ -56,6 +56,38 @@ func milestoneDisplay(s store.MilestoneReadSnapshot) string {
 	}
 	return s.Milestone.Status
 }
+
+func renderMilestoneGraphOverlay(snapshots []store.MilestoneReadSnapshot) string {
+	var b strings.Builder
+	b.WriteString("\nMilestone checkpoints (non-gating):\n")
+	if len(snapshots) == 0 {
+		b.WriteString("none\n")
+		return b.String()
+	}
+	for i, snapshot := range snapshots {
+		connector := "├──"
+		anchorPrefix := "│  "
+		if i == len(snapshots)-1 {
+			connector = "└──"
+			anchorPrefix = "   "
+		}
+		symbol := "◇"
+		switch milestoneDisplay(snapshot) {
+		case "ready_to_mark":
+			symbol = "◎"
+		case domain.MilestoneStatusMarked:
+			symbol = "◆"
+		}
+		anchorIDs := make([]string, 0, len(snapshot.Anchors))
+		for _, anchor := range snapshot.Anchors {
+			anchorIDs = append(anchorIDs, anchor.ID)
+		}
+		fmt.Fprintf(&b, "%s %s %s  %s [%s]\n", connector, symbol, snapshot.Milestone.ID, snapshot.Milestone.Title, milestoneDisplay(snapshot))
+		fmt.Fprintf(&b, "%s └── anchors: %s\n", anchorPrefix, strings.Join(anchorIDs, ", "))
+	}
+	return b.String()
+}
+
 func milestoneTask(t domain.Task, anchor bool) milestoneTaskDTO {
 	return milestoneTaskDTO{t.ID, t.Title, t.Status, t.Priority, t.CreationOrder, t.AttemptCount, anchor}
 }

@@ -12,7 +12,7 @@ relo project update [--goal TEXT] [--prd PATH]
 relo project refresh-prd
 relo project remove --force
 relo validate
-relo graph [--format tree|json]
+relo graph [--format tree|json] [--include-milestones]
 relo status [--json]
 ```
 
@@ -102,7 +102,7 @@ relo milestone recommendation remove MILESTONE-ID REC-ID
 relo milestone mark MILESTONE-ID --summary TEXT [--reference TEXT]
 ```
 
-Milestones are `planned` or `marked`. A planned milestone is ready to mark when all anchors pass. It never changes task readiness. Marking snapshots the passed anchor/dependency scope and makes the milestone immutable.
+Milestones are `planned` or `marked`. A planned milestone is ready to mark when all anchors pass. It never changes task readiness. Marking snapshots the passed anchor/dependency scope and makes the milestone immutable. `graph --include-milestones` appends a non-gating checkpoint overlay to tree output. It is rejected with `--format json`, which remains the task-DAG contract.
 
 ## IDs and output
 

@@ -50,7 +50,7 @@ Mutation commands require canonical task IDs such as `TASK-001`. Titles are allo
 - `relo task stop TASK-ID... --reason "..."`: atomically stop running work back to pending when the main agent needs to revise the graph or content.
 - `relo task retry TASK-ID`: move a failed task back to pending.
 - `relo task reopen TASK-ID --reason "..."`: move a passed task back to pending when safe.
-- `relo graph [--format tree|json]`: inspect deterministic graph shape and status summary.
+- `relo graph [--format tree|json] [--include-milestones]`: inspect deterministic task graph shape and status summary. For tree output, `--include-milestones` appends non-gating checkpoint/anchor relationships without changing task-DAG legality; graph JSON remains task-only.
 - `relo status [--json]`: inspect running, ready, blocked, and failed buckets.
 - `relo validate`: check project/task data, dependency integrity, cycles, and runtime invariants.
 

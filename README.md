@@ -173,12 +173,13 @@ relo milestone create \
   --anchor TASK-002 \
   --recommend "Run the integration suite"
 
+relo graph --include-milestones
 relo milestone ready --details
 relo milestone mark MILESTONE-001 \
   --summary "Integration checks passed"
 ```
 
-A planned milestone becomes ready when all anchors pass. Milestones never block task readiness or execution. Marking verifies the complete scope and stores an immutable snapshot.
+A planned milestone becomes ready when all anchors pass. Milestones never block task readiness or execution. Marking verifies the complete scope and stores an immutable snapshot. `relo graph --include-milestones` appends a human-readable, non-gating checkpoint overlay; it does not add milestone nodes or edges to the task DAG.
 
 ## Command overview
 
@@ -192,7 +193,7 @@ relo project update [--goal TEXT] [--prd PATH]
 relo project refresh-prd
 relo project remove --force
 relo validate
-relo graph [--format tree|json]
+relo graph [--format tree|json] [--include-milestones]
 relo status [--json]
 ```
 
@@ -323,7 +324,7 @@ Task creation requires exactly one of `--objective` or `--objective-file`; updat
 
 `relo project show --json`, `relo task list --json`, and `relo task get --json` use the `relo.output/v1` envelope. Project show includes `goal`, `prd_path`, and `prd_hash`; list output is summary-only. Task get's nested project remains `goal` and `prd_path`, and its task detail includes creation/runtime fields; `last_failure_reason`, `last_completion_summary`, and `current_attempt` are nullable. `current_attempt` is present only while running and has nullable `completed_at`, `summary`, and `reason`. `relo validate` writes warnings to stderr and always writes `OK` to stdout when it has no errors.
 
-Milestone readiness means every anchor passed. Marking validates anchors and their transitive dependency scope; milestones are non-gating and never affect task readiness, dependency legality, or start.
+Milestone readiness means every anchor passed. Marking validates anchors and their transitive dependency scope; milestones are non-gating and never affect task readiness, dependency legality, or start. `graph --include-milestones` is available only for tree output; graph JSON remains the versioned task-DAG contract.
 
 ## License
 

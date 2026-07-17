@@ -132,6 +132,14 @@ relo graph
 relo task ready --details
 ```
 
+When planned or marked milestones exist and checkpoint placement matters, append their non-gating anchor overlay to human tree output:
+
+```bash
+relo graph --include-milestones
+```
+
+The overlay does not add milestone nodes or dependency edges to the task DAG. It is unavailable with `--format json`, whose contract remains task-only.
+
 ## Follow legal task transitions
 
 ```text
