@@ -178,6 +178,60 @@ func TestCLIProjectUpdateRefreshPRDFromSubdirectory(t *testing.T) {
 	}
 }
 
+func TestCLIProjectRemoveRequiresForceAndProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	prdPath := filepath.Join(root, "prd.md")
+	if err := os.WriteFile(prdPath, []byte("prd"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "goal"); err != nil {
+		t.Fatalf("init failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	metadataDir := filepath.Join(root, ".relo")
+	unknownPath := filepath.Join(metadataDir, "keep.txt")
+	if err := os.WriteFile(unknownPath, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, stderr, err := run(t, root, "project", "remove"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "--force is required") {
+		t.Fatalf("remove without force out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if _, err := os.Stat(filepath.Join(metadataDir, "relo.db")); err != nil {
+		t.Fatalf("remove without force changed database: %v", err)
+	}
+
+	sub := filepath.Join(root, "nested")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, stderr, err := run(t, sub, "project", "remove", "--force"); err == nil || exitCode(err) != 2 || !strings.Contains(stderr, "must run from the project root") {
+		t.Fatalf("nested remove out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if _, err := os.Stat(filepath.Join(metadataDir, "relo.db")); err != nil {
+		t.Fatalf("nested remove changed database: %v", err)
+	}
+
+	out, stderr, err := run(t, root, "project", "remove", "--force")
+	if err != nil {
+		t.Fatalf("remove failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+	if !strings.Contains(out, "Removed relo project state at "+root) || !strings.Contains(out, "Preserved non-empty metadata directory") {
+		t.Fatalf("unexpected remove output: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(metadataDir, "relo.db")); !os.IsNotExist(err) {
+		t.Fatalf("database remains after remove: %v", err)
+	}
+	if got, err := os.ReadFile(unknownPath); err != nil || string(got) != "keep" {
+		t.Fatalf("unknown metadata file was not preserved: got=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(prdPath); err != nil || string(got) != "prd" {
+		t.Fatalf("PRD was not preserved: got=%q err=%v", got, err)
+	}
+	if out, stderr, err := run(t, root, "init", "--prd", "prd.md", "--goal", "replacement"); err != nil {
+		t.Fatalf("reinit after remove failed: out=%s stderr=%s err=%v", out, stderr, err)
+	}
+}
+
 func TestCLIEmptyReloDoesNotCreateDB(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, ".relo"), 0755); err != nil {

@@ -59,6 +59,14 @@ When the contents of the existing PRD change and have been reviewed, acknowledge
 relo project refresh-prd
 ```
 
+Remove project state only when the user explicitly requests this irreversible action. Run it from the project root; it preserves the PRD, source files, and unknown `.relo` contents:
+
+```bash
+relo project remove --force
+```
+
+Never use project removal as a recovery probe or as a shortcut for reconciling existing state.
+
 ## Create useful tasks
 
 A task requires a title, an objective (inline or from a file), and at least one acceptance criterion:

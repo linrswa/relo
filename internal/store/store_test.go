@@ -111,6 +111,63 @@ func TestInitProjectMigrateAndRepeatGuard(t *testing.T) {
 	}
 }
 
+func TestRemoveProjectStateDeletesManagedFilesAndPreservesUnknownFiles(t *testing.T) {
+	s, root := newProject(t)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	metadataDir := filepath.Join(root, ".relo")
+	dbPath := DBPath(root)
+	for _, path := range []string{dbPath + "-shm", dbPath + "-wal"} {
+		if err := os.WriteFile(path, []byte("sidecar"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unknownPath := filepath.Join(metadataDir, "keep.txt")
+	if err := os.WriteFile(unknownPath, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RemoveProjectState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Root != root || result.MetadataDirRemoved {
+		t.Fatalf("unexpected removal result: %#v", result)
+	}
+	for _, path := range []string{dbPath, dbPath + "-shm", dbPath + "-wal"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("managed file remains at %s: %v", path, err)
+		}
+	}
+	if got, err := os.ReadFile(unknownPath); err != nil || string(got) != "keep" {
+		t.Fatalf("unknown file was not preserved: got=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "prd.md")); err != nil || string(got) != "prd" {
+		t.Fatalf("PRD was not preserved: got=%q err=%v", got, err)
+	}
+	if _, err := InitProject(context.Background(), root, "prd.md", "replacement"); err != nil {
+		t.Fatalf("reinitialize after removal: %v", err)
+	}
+}
+
+func TestRemoveProjectStateRemovesEmptyMetadataDirectory(t *testing.T) {
+	s, root := newProject(t)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RemoveProjectState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.MetadataDirRemoved {
+		t.Fatalf("metadata directory not reported removed: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".relo")); !os.IsNotExist(err) {
+		t.Fatalf("metadata directory remains: %v", err)
+	}
+}
+
 func TestProjectUpdateGoalPRDAndRollback(t *testing.T) {
 	ctx := context.Background()
 	s, root := newProject(t)

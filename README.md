@@ -126,6 +126,8 @@ relo status
 
 Initialization creates `.relo/relo.db`. The database is ignored by Git and is an internal implementation detail—use the CLI rather than reading or editing it directly.
 
+To permanently remove relo state, run `relo project remove --force` from the project root. This preserves the PRD, source files, and any unknown files under `.relo`; only the relo-managed database and its sidecars are removed.
+
 ## Core model
 
 ### Tasks and dependencies
@@ -188,6 +190,7 @@ relo project show [--json]
 relo version
 relo project update [--goal TEXT] [--prd PATH]
 relo project refresh-prd
+relo project remove --force
 relo validate
 relo graph [--format tree|json]
 relo status [--json]
