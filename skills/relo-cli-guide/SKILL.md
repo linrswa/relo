@@ -1,271 +1,115 @@
 ---
 name: relo-cli-guide
-description: Use the relo CLI correctly to initialize projects, create and update tasks, manage acceptance criteria and notes, build dependency DAGs, inspect ready/blocked work, perform legal task state transitions, validate or render project state, consume JSON output, and manage milestone checkpoints. Use whenever the user asks to operate, explain, script, troubleshoot, or integrate the relo command-line interface. This skill teaches CLI usage only; do not launch subagents or impose a delivery-orchestration workflow merely because it is active.
-compatibility: Requires access to a relo executable and, except for init, a repository initialized with .relo metadata.
+description: Operate, explain, script, integrate, and troubleshoot the relo CLI, including executable version and upgrade behavior, project metadata, task and dependency commands, legal runtime transitions, milestones, graph/status/validation views, and relo.output/v1 JSON. Use whenever a request concerns relo command syntax, supported flags, state or output interpretation, shell automation, upgrades, recovery from a CLI error, or executing an already-specified relo mutation. This is a CLI contract guide only; for PRD decomposition, delivery planning, task selection, milestone strategy, implementation verification, worker coordination, or execution policy, use relo-delivery-workflow instead.
+compatibility: Requires access to a relo executable and, except for version, upgrade, and initialization, a repository initialized with .relo metadata.
 ---
 
 # Relo CLI guide
 
-Use `relo` as a task and checkpoint runtime. Apply the public command contract accurately without inventing orchestration policy.
+Apply relo's public command contract accurately. Keep CLI mechanics separate from software-delivery decisions.
 
-## Operating rules
+## Keep the responsibility boundary clear
 
-1. Locate the executable from the user or environment and use the same path consistently. If uncertain, run `command -v relo` and `relo --help`.
-2. Run the relevant `<command> --help` before guessing syntax or flags. Read [references/command-reference.md](references/command-reference.md) when exact syntax or command coverage matters.
-3. Run commands from the project directory or one of its descendants. Relo discovers the nearest parent containing the regular file `.relo/relo.db`; an empty `.relo/` directory is not an initialized project.
-4. Never read, edit, query, copy as an API, or otherwise depend on `.relo/relo.db`. It is private SQLite state; use CLI commands only.
-5. Use canonical IDs such as `TASK-001`, `MILESTONE-001`, `AC-001`, `NOTE-001`, and `REC-001`. Task titles are supported only for exact, read-only lookup with `task get --title`; use IDs for mutations.
-6. Treat command failures as authoritative. Do not work around rejected state transitions by editing persistence.
-7. Inspect current state and command help before mutating. Never use a mutation as a probe to discover whether it is legal; a rejected mutation is an execution error, not a discovery strategy. If an unexpected rejection occurs, preserve it in the report, recover through supported commands, and do not present the rejected command as part of the recommended sequence.
-8. This skill does not require or authorize launching subagents. Only do so when the user or another applicable workflow explicitly requests it.
+Use this skill to:
 
-## Understand the model
+- discover supported commands and flags;
+- execute an operation the user has already specified;
+- inspect and explain project, task, dependency, attempt, or milestone state;
+- write scripts against supported JSON output;
+- diagnose rejected commands and choose a legal CLI recovery path;
+- inspect or upgrade the executable.
 
-- A **project** records one goal, a PRD path, and the PRD content hash.
-- A **task definition** contains an objective, at least one acceptance criterion, optional notes, a non-negative priority, and dependency edges.
-- Lower priority numbers sort first. Priority affects display order, not dependency legality.
-- Stored task states are `pending`, `running`, `passed`, and `failed`.
-- `ready` and `blocked` are derived states for pending tasks. A task is ready only when all dependencies are passed.
-- Starting a task opens an attempt. Passing, failing, or stopping it closes that attempt.
-- A **milestone** is an optional, non-executing checkpoint over anchor tasks and their transitive dependencies. It never blocks `task ready` or `task start`.
+Do not use this skill to decide how to decompose a PRD, which tasks or priorities should exist, whether a milestone is strategically useful, what ready work to select, how implementation should be verified, or how workers should be coordinated. Those decisions belong to `relo-delivery-workflow` or to explicit user instructions. When both skills apply, the delivery workflow decides **what** should happen and this guide supplies **how** to express it through the CLI.
 
-## Initialize and inspect a project
+Activation of this guide does not by itself authorize subagents, task execution, upgrades, project removal, or any other mutation.
 
-Before initializing, confirm the PRD exists and the requested goal is clear:
+## Follow this operating procedure
 
-```bash
-relo init --prd docs/prd.md --goal "Deliver the project goal"
-```
+1. Determine whether the user wants an explanation, a script, or actual execution. Do not mutate state for an explanation-only request.
+2. Bind to one executable. Use the path supplied by the user; otherwise use `command -v relo`. Run `relo --help` and the relevant command's `--help` before relying on remembered syntax.
+3. Read the relevant section of [references/command-reference.md](references/command-reference.md). If an installed executable differs from the reference, its current `--help` and observed supported behavior win; report the version mismatch rather than guessing.
+4. Establish project context. Run `init` from the intended project root. Other project commands discover the nearest initialized ancestor containing `.relo/relo.db`; an empty `.relo/` directory is not initialized. `project remove` is root-only.
+5. Inspect the narrowest useful state before a mutation, using commands such as `project show`, `task get`, `task ready`, `milestone get`, `status`, or `graph`.
+6. Execute only supported mutations that are necessary for the request. Preserve generated IDs and non-zero failures in the report.
+7. Verify through public reads. Use `validate` after structural changes, then select `task get`, `task ready`, `milestone get`, `graph`, or `status` according to what changed.
 
-Do not retry initialization with a force option; none exists. For an initialized project:
+Never read, edit, query, copy as an API, or otherwise depend on `.relo/relo.db`; it is private SQLite state. Never bypass a rejected mutation through persistence edits.
 
-```bash
-relo project show
-relo status
-relo graph
-relo validate
-```
+## Preserve identity and command intent
 
-Update project metadata deliberately:
+- Keep CLI-emitted IDs such as `TASK-001`, `AC-001`, `NOTE-001`, `MILESTONE-001`, and `REC-001` verbatim.
+- Use IDs for mutations. A task title is available only for exact, read-only `task get --title` lookup, and duplicate exact titles make that lookup ambiguous.
+- Do not use a mutation as a probe. Inspect state and help first. If a requested operation is illegal, explain the constraint and the supported recovery sequence without intentionally issuing a command expected to fail.
+- Treat batch failures as authoritative. Multi-task start/stop and batch dependency changes are atomic; do not report partial success when the CLI rejects the batch.
+- Run destructive or environment-changing commands such as `upgrade` and `project remove --force` only when explicitly requested.
 
-```bash
-relo project update --goal "Revised goal"
-relo project update --prd docs/new-prd.md
-```
+## Apply the task and dependency invariants
 
-When the contents of the existing PRD change and have been reviewed, acknowledge the new hash without changing tasks automatically:
-
-```bash
-relo project refresh-prd
-```
-
-Remove project state only when the user explicitly requests this irreversible action. Run it from the project root; it preserves the PRD, source files, and unknown `.relo` contents:
-
-```bash
-relo project remove --force
-```
-
-Never use project removal as a recovery probe or as a shortcut for reconciling existing state.
-
-## Create useful tasks
-
-A task requires a title, an objective (inline or from a file), and at least one acceptance criterion:
-
-```bash
-relo task create \
-  --title "Add storage layer" \
-  --objective "Persist catalog entries in SQLite" \
-  --accept "Create and retrieve entries" \
-  --accept "Storage tests pass" \
-  --priority 20
-```
-
-Capture observable completion conditions in `--accept`; use notes for implementation context:
-
-```bash
-relo task note add TASK-001 --text "Reuse the existing database helper"
-relo task acceptance add TASK-001 --text "Invalid records are rejected"
-```
-
-Inspect tasks with:
-
-```bash
-relo task get TASK-001
-relo task get --title "Add storage layer"
-relo task list
-relo task list --status pending
-```
-
-Exact-title lookup fails when titles are duplicated. Mutations always use the ID.
-
-## Build and revise dependencies
-
-The first positional ID is the target task; every following ID is something it must wait for:
-
-```bash
-relo task dependency add TASK-003 TASK-001 TASK-002 \
-  --reason "Both foundations are required"
-```
-
-For distinct edge reasons, use one mapping per dependency instead of relying on argument order:
-
-```bash
-relo task dependency add TASK-003 TASK-001 TASK-002 \
-  --reason-for 'TASK-001=Provides the schema' \
-  --reason-for 'TASK-002=Provides the service API'
-```
-
-`--reason` and `--reason-for` are mutually exclusive. Every dependency needs a non-empty reason. Dependency additions are atomic and reject self-dependencies, duplicates, missing tasks, and cycles.
-
-Revise edges with an audit reason:
-
-```bash
-relo task dependency reason TASK-003 TASK-001 --text "Updated rationale"
-relo task dependency remove TASK-003 TASK-002 --reason "The API is no longer used"
-```
-
-After graph changes, run:
-
-```bash
-relo validate
-relo graph
-relo task ready --details
-```
-
-Human tree output includes planned and ready milestone anchors as non-gating checkpoints by default. Use `relo graph --all-milestones` when marked history matters, or `relo graph --tasks-only` for the pure task DAG.
-
-The checkpoint overlay does not add milestone nodes or dependency edges to the task DAG. Graph JSON always remains task-only and rejects both tree-view flags.
-
-## Follow legal task transitions
+Stored task states are `pending`, `running`, `passed`, and `failed`. `ready` and `blocked` are derived views of pending tasks; a pending task is ready only when all dependencies have passed.
 
 ```text
 pending --start--> running --pass--> passed
                          \--fail--> failed --retry--> pending
-                         \--stop--> pending
-passed  --reopen-----------------> pending
+                         \--stop-------------------> pending
+passed  --reopen-------------------------------> pending
 ```
-
-Use the current ready frontier rather than assuming a pending task can start:
-
-```bash
-relo task ready --details
-relo task start TASK-001
-```
-
-Close running attempts explicitly:
-
-```bash
-relo task pass TASK-001 --summary "Implemented storage and passed package tests"
-relo task fail TASK-001 --reason "Required upstream API is missing"
-relo task stop TASK-001 --reason "Definition must be revised"
-```
-
-Then recover as appropriate:
-
-```bash
-relo task retry TASK-001
-relo task reopen TASK-002 --reason "Acceptance behavior must change"
-```
-
-Important constraints:
 
 - `start` accepts only ready pending tasks.
-- `pass`, `fail`, and `stop` accept only running tasks with one open attempt.
-- `fail`, `stop`, and `reopen` require a non-empty reason. A pass summary is supported and should describe verified work.
-- `retry` accepts only failed tasks.
-- `reopen` accepts only passed tasks and is rejected while downstream tasks are running or passed.
-- Definitions, acceptance criteria, notes, dependencies, and priority can be changed only while the task is pending or failed.
-- Stop a running task before changing its definition. If passed upstream work must change, inspect the graph first, stop any running descendants, then reopen passed descendants from leaves toward the target before reopening it. After the update, rerun affected tasks in dependency order.
-- Multi-task `start` and `stop` are atomic: if one requested transition is invalid, none are changed.
+- `pass`, `fail`, and `stop` accept only running tasks with an open attempt.
+- `retry` accepts only failed tasks; `reopen` accepts only passed tasks.
+- `fail`, `stop`, and `reopen` require reasons. `pass` supports an optional evidence-based summary.
+- Task definitions, acceptance criteria, notes, and deletion are mutable only while that task is pending or failed. For a dependency mutation, this rule applies to the dependent target (the first ID); the prerequisite's state does not control whether the edge can change. Stop a running target before editing it.
+- Reopening passed upstream work is rejected while downstream tasks are running or passed. Inspect the graph, stop running descendants, and reopen passed descendants from leaves toward the target before retrying the upstream reopen.
+- After a definition or graph edit, do not automatically rerun or pass implementation tasks. Do so only when the user or delivery workflow requests it and completion evidence exists.
 
-Update pending or failed definitions with:
-
-```bash
-relo task update TASK-001 --title "Revised title"
-relo task update TASK-001 --objective-file docs/task-001-objective.md
-relo task update TASK-001 --priority 10 --reason "Needed before integration"
-```
-
-Changing priority requires `--reason`.
-
-## Use milestones as checkpoints
-
-Create a planned milestone with at least one task anchor:
+Dependency syntax is always **target first, prerequisites after it**:
 
 ```bash
-relo milestone create \
-  --title "Storage foundation" \
-  --reason "The persistence boundary is ready to inspect" \
-  --anchor TASK-002 \
-  --recommend "Run storage integration tests"
+relo task dependency add TASK-003 TASK-001 TASK-002 \
+  --reason "TASK-003 requires both inputs"
 ```
 
-Inspect and maintain planned milestones:
+Here `TASK-003` waits for `TASK-001` and `TASK-002`. Every edge needs a non-empty reason. Additions reject missing tasks, duplicates, self-dependencies, and cycles.
 
-```bash
-relo milestone get MILESTONE-001
-relo milestone list --status planned
-relo milestone ready --details
-relo milestone anchor add MILESTONE-001 TASK-003
-relo milestone recommendation add MILESTONE-001 --text "Review migration behavior"
-```
+Priority is a non-negative sort key; lower numbers appear first. It does not create an edge, unblock a task, or override lifecycle rules.
 
-A planned milestone becomes ready when all anchors pass. Its scope is the anchors plus their transitive dependency closure. Marking revalidates that complete scope and stores an immutable snapshot:
+## Apply milestone semantics without adding strategy
 
-```bash
-relo milestone mark MILESTONE-001 \
-  --summary "Checkpoint checks completed" \
-  --reference "optional-external-reference"
-```
+This guide explains milestone mechanics but does not decide whether delivery needs a checkpoint. Keep these three facts distinct:
 
-Whenever explaining milestone behavior, distinguish all three facts explicitly:
+1. A planned milestone is ready when all of its anchor tasks have passed.
+2. Marking revalidates every anchor plus its transitive dependency scope and stores a snapshot.
+3. Milestones are non-gating: they never change task dependencies, `task ready`, or `task start` legality.
 
-1. Readiness is derived from the anchor tasks being passed.
-2. Marking validates the complete anchor-plus-transitive-dependency scope.
-3. Milestones are non-gating: they do not change `task ready`, dependency legality, or `task start`.
+Only planned milestones are mutable or deletable. Marked milestones are immutable historical records, and later task changes do not rewrite their snapshots. If the user explicitly requests a later revised checkpoint, preserve the marked record and use a new planned milestone rather than probing immutable mutations.
 
-Marked milestones cannot be updated or deleted. Later task changes do not rewrite their snapshots. If the user wants to revise a marked checkpoint, preserve it and create a new planned milestone as a successor rather than probing immutable mutation commands.
+Human tree graphs show active milestone anchors by default. `--all-milestones` adds marked history and `--tasks-only` removes the overlay. These are tree-display options only; graph JSON remains a task-only DAG.
 
-## Choose human or JSON output
+## Handle output and errors correctly
 
-Use human output for interactive work. JSON is available only for:
+Use human output for interactive work. Use JSON only on the commands explicitly listed in the command reference; do not assume a global `--json` flag.
 
-```bash
-relo project show --json
-relo graph --format json
-relo status --json
-relo task list [--status pending|running|passed|failed] --json
-relo task get TASK-001 --json
-relo task ready --json
-relo milestone get MILESTONE-001 --json
-relo milestone list --json
-relo milestone ready --json
-```
-
-JSON uses a versioned envelope:
+Successful structured reads use this envelope:
 
 ```json
-{
-  "schemaVersion": "relo.output/v1",
-  "ok": true,
-  "data": {}
-}
+{"schemaVersion":"relo.output/v1","ok":true,"data":{}}
 ```
 
-Recognized JSON-mode command failures return `ok: false` on stdout with a non-zero exit code. Root-level parsing failures, such as an unknown command, can occur before JSON mode is established and may use stderr. Do not assume unsupported commands accept `--json`.
+For scripts, check both the process exit code and the envelope. Recognized JSON-mode failures return a non-zero exit code with `ok: false` on stdout. Unknown command paths can fail during root discovery before JSON mode is established and may write plain text to stderr. Preserve nullable runtime fields rather than coercing absence into false values.
 
-## Verify the resulting state
+`validate` writes warnings and errors to stderr. It still writes `OK` to stdout when there are warnings but no errors, so scripts must not treat any stderr output as automatic validation failure.
 
-After meaningful mutations, select the narrowest relevant checks and finish with:
+## Troubleshoot through supported reads
 
-```bash
-relo validate
-relo graph
-relo status
-```
+- **Unknown command or flag:** compare `relo --version`, root help, and the relevant subcommand help with the reference. Do not substitute a stale spelling.
+- **Project not found:** move to the intended root or a descendant and confirm it was initialized through `relo project show`; an empty metadata directory is insufficient.
+- **Task cannot start:** inspect `task get`, `task ready --details`, and `graph`; pending does not imply ready.
+- **Definition cannot change:** inspect stored state; stop running work or apply the legal downstream-first reopen sequence for passed work.
+- **Title lookup fails:** use the canonical task ID, especially when exact titles are duplicated.
+- **Upgrade is refused:** if relo identifies package-manager ownership, follow the named manager's command instead of replacing the executable directly.
+- **Project removal is refused or incomplete:** close concurrent relo commands, stay at the project root, and follow any recovery-directory instruction in the error; do not retry blindly.
+- **JSON parsing fails:** confirm that the command supports JSON and capture stdout, stderr, and exit status separately.
 
-Interpret warnings rather than hiding them. Successful completion means the CLI state matches the user's requested task graph and lifecycle—not that an external implementation has been verified unless the user separately provided that evidence.
+## Report only verified CLI results
 
-## Current UX contracts
-
-Use `relo --help` for root discovery and `relo version` for a plain build version. Project lookup walks upward to `.relo/relo.db`. `task create` requires exactly one of `--objective` and `--objective-file`; `task update` accepts either but rejects both. Dependency commands are `target prerequisite...`: later IDs are prerequisites of the first. Stop running tasks before editing and reopen passed tasks before editing. `validate` prints `OK` to stdout whenever there are no errors, even if warnings are on stderr. Only listed JSON commands use `relo.output/v1`: project show has `goal`, `prd_path`, `prd_hash`; task list supplies summaries; task get retains nested project `goal`/`prd_path` and adds runtime fields. `last_failure_reason`, `last_completion_summary`, and `current_attempt` are nullable; the running current attempt also has nullable completion, summary, and reason. Milestone readiness requires passed anchors; marking validates anchor transitive scope and never changes task dependency or ready/start legality.
+Distinguish commands that were executed from commands merely recommended. Report important stdout/stderr, non-zero exits, and the resulting relo state. A successful relo mutation or clean validation proves CLI state only; it does not prove external implementation work, tests, review, or delivery completion.

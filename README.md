@@ -28,6 +28,16 @@ Download a prebuilt archive from [GitHub Releases](https://github.com/linrswa/re
 
 Each release includes `checksums.txt` with SHA-256 checksums for its archives.
 
+A manually installed release binary can check for and install updates directly from the official GitHub Releases:
+
+```bash
+relo upgrade --check
+relo upgrade
+relo upgrade --version v1.2.3
+```
+
+`upgrade` verifies the archive against `checksums.txt` before replacing the executable. If relo detects a package-manager-owned installation, it refuses to overwrite it and reports the manager plus an upgrade command when one is known.
+
 ### Go install
 
 Go 1.26.5 or newer is required:
@@ -188,7 +198,9 @@ A planned milestone becomes ready when all anchors pass. Milestones never block 
 ```text
 relo init --prd PATH --goal TEXT
 relo project show [--json]
-relo version
+relo -v  # or --version
+relo upgrade [--check]
+relo upgrade --version VERSION
 relo project update [--goal TEXT] [--prd PATH]
 relo project refresh-prd
 relo project remove --force
@@ -286,7 +298,7 @@ go vet ./...
 test -z "$(gofmt -l cmd internal)"
 ```
 
-Tags matching `v*` trigger the GitHub Actions release workflow. GoReleaser builds the supported platform archives, injects the release version into `relo version`, generates SHA-256 checksums, and publishes a GitHub Release.
+Tags matching `v*` trigger the GitHub Actions release workflow. GoReleaser builds the supported platform archives, injects the release version into `relo -v` and `relo --version`, generates SHA-256 checksums, and publishes a GitHub Release.
 
 ## Documentation
 
@@ -319,7 +331,7 @@ Multiple tasks may be running at once, but process isolation and safe parallel e
 
 ## CLI UX notes
 
-Run `relo --help` to discover commands; an initialized project is discovered from the current directory or a parent containing `.relo/relo.db`. `relo version` prints the human-readable build version.
+Run `relo --help` to discover commands; an initialized project is discovered from the current directory or a parent containing `.relo/relo.db`. `relo -v` and `relo --version` print the human-readable build version. `relo upgrade` is project-independent, reads the official GitHub Releases, verifies SHA-256 checksums, and does not replace installations it can identify as package-manager-owned.
 
 Task creation requires exactly one of `--objective` or `--objective-file`; update accepts either source but rejects both. In dependency commands, the first ID is the dependent task and later IDs are prerequisites. Running tasks must be stopped before definition changes, and passed tasks must be reopened first.
 

@@ -1103,13 +1103,15 @@ func TestCLIProjectAndTaskSummaryJSONContracts(t *testing.T) {
 	if summary["id"] != "TASK-001" || summary["title"] != "T" || summary["status"] != "pending" || summary["attempt_count"] != float64(0) || summary["last_failure_reason"] != nil || summary["last_completion_summary"] != nil {
 		t.Fatalf("summary = %#v", summary)
 	}
-	out, stderr, err = run(t, root, "version")
-	if err != nil || stderr != "" || out != "dev\n" {
-		t.Fatalf("version = out=%q stderr=%q err=%v", out, stderr, err)
+	for _, flag := range []string{"-v", "--version"} {
+		out, stderr, err = run(t, root, flag)
+		if err != nil || stderr != "" || out != "dev\n" {
+			t.Fatalf("%s = out=%q stderr=%q err=%v", flag, out, stderr, err)
+		}
 	}
-	_, _, err = run(t, root, "version", "extra")
+	_, _, err = run(t, root, "version")
 	if exitCode(err) != 2 {
-		t.Fatalf("version extra exit = %d", exitCode(err))
+		t.Fatalf("version command exit = %d", exitCode(err))
 	}
 }
 
@@ -1248,7 +1250,7 @@ func TestCLIObjectiveHelpRecoveryAndWarnings(t *testing.T) {
 		t.Fatalf("validate warning: out=%q stderr=%q err=%v", out, stderr, err)
 	}
 	out, stderr, err = run(t, root, "--help")
-	if err != nil || !strings.Contains(out, "version") || !strings.Contains(out, "manages") || stderr != "" {
+	if err != nil || !strings.Contains(out, "-v, --version") || !strings.Contains(out, "manages") || stderr != "" {
 		t.Fatalf("root help=%q stderr=%q", out, stderr)
 	}
 	out, _, _ = run(t, root, "task", "dependency", "--help")

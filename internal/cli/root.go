@@ -83,19 +83,15 @@ func (a *app) rootCmd() *cobra.Command {
 		Short:        "Manage an agent-owned task dependency graph",
 		Long:         "relo manages tasks, dependencies, runtime state, and milestone records. Run `relo --help` to discover commands; projects are found from the current directory or any parent containing .relo/relo.db.",
 		Example:      "  relo init --prd docs/prd.md --goal \"Ship the feature\"\n  relo task ready\n  relo task get TASK-001",
+		Version:      Version,
 		SilenceUsage: true, SilenceErrors: true,
 	}
+	cmd.SetVersionTemplate("{{.Version}}\n")
 	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return store.ValidationError{Message: err.Error()}
 	})
-	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.milestoneCmd(), a.validateCmd(), a.graphCmd(), a.statusCmd(), a.versionCmd())
+	cmd.AddCommand(a.initCmd(), a.projectCmd(), a.taskCmd(), a.milestoneCmd(), a.validateCmd(), a.graphCmd(), a.statusCmd(), a.upgradeCmd())
 	return cmd
-}
-
-func (a *app) versionCmd() *cobra.Command {
-	return &cobra.Command{Use: "version", Short: "Print the relo version", Args: validationArgs(cobra.NoArgs), Run: func(cmd *cobra.Command, args []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), Version)
-	}}
 }
 
 func validationArgs(fn cobra.PositionalArgs) cobra.PositionalArgs {
