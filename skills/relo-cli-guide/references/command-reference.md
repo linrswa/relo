@@ -32,10 +32,10 @@ Version and upgrade operations do not require an initialized project. Upgrade be
 
 - `upgrade --check` queries the latest stable official GitHub Release without replacing the executable.
 - `upgrade` installs the latest stable release only when it is newer; it does not downgrade.
-- `upgrade --version VERSION` selects that exact release, with or without a leading `v`. An exact prerelease or older version is allowed; requesting the installed version is a no-op.
+- `upgrade --version VERSION` selects that exact release, with or without a leading `v`. An exact prerelease or older version is allowed. After installation-source and release checks succeed, selecting the installed version does not replace the executable.
 - `--check` and `--version` are mutually exclusive.
 - Installation supports release archives for Linux, macOS, and Windows on `amd64` and `arm64`. Other platform combinations are rejected.
-- Installation downloads the official OS/architecture archive and `checksums.txt`, verifies SHA-256, and only then replaces a manually installed executable.
+- Installation downloads the official OS/architecture archive and `checksums.txt`, verifies SHA-256, confirms that the current executable has not changed since inspection, and only then replaces a manually installed executable.
 - If relo detects package-manager ownership, it refuses replacement. Use the manager and command named in the error when provided.
 - Upgrade has human output only and no `--json` mode.
 
@@ -60,7 +60,7 @@ relo project refresh-prd
 relo project remove --force
 ```
 
-- `project update` requires at least one of `--goal` or `--prd`; supplied values must be non-empty. Changing the PRD also stores its current hash.
+- `project update` requires at least one of `--goal` or `--prd`; supplied values must be non-empty. Changing the PRD also stores its current hash. A relative `--prd` path is resolved from the discovered project root, even when the command runs in a descendant.
 - `project refresh-prd` recomputes the hash of the current PRD path. It does not revise tasks automatically.
 - `project remove --force` is irreversible and must run from the discovered project root, not a descendant. It removes `relo.db` and managed `-wal`/`-shm` sidecars while preserving the PRD, source files, and unknown `.relo` contents. It refuses removal while another relo process holds the project lock. If final cleanup fails after files are staged, follow the reported recovery-directory instruction before reinitializing. Run it only on explicit request.
 
@@ -99,7 +99,7 @@ relo task update TASK-ID FLAG...                 # combine supported changes
 relo task delete TASK-ID
 ```
 
-- Update requires at least one changed field. Objective and objective-file cannot be combined.
+- Update requires at least one changed field. Objective and objective-file cannot be combined. Relative objective-file paths for create and update are read from the command's current working directory.
 - A priority change requires a non-empty audit reason.
 - Delete is also rejected when downstream tasks depend on the task or a planned milestone anchors it.
 - Stop a running task before editing or deleting. Reopen passed work before editing; the reopen guards are described under [Task runtime](#task-runtime).
@@ -202,8 +202,10 @@ relo milestone mark MILESTONE-ID --summary TEXT [--reference TEXT]
 ```
 
 - Update requires at least one non-empty changed field.
+- Anchor add/remove batches are atomic. They reject duplicate IDs and missing tasks; add also rejects existing anchors, while remove rejects anchors that are not present.
 - Anchor removal must leave at least one anchor.
-- Mark requires a non-empty summary and accepts an optional non-empty external reference.
+- Recommendation text for create, add, and update must be non-empty.
+- Mark requires a non-empty summary and accepts an optional external reference; an empty or whitespace-only reference is stored as absent.
 - Readiness is derived: every anchor must be passed.
 - Marking revalidates each anchor and its transitive dependency closure, requires the complete scope to be passed, and stores an immutable snapshot.
 - Marked milestones cannot be updated, deleted, re-marked, or have anchors/recommendations changed. Later task changes do not rewrite the snapshot.
@@ -265,6 +267,8 @@ Recognized JSON-mode failures use a non-zero process exit and an error envelope 
 ```
 
 Unknown command paths can fail during root discovery before JSON mode is established and write plain text to stderr. Scripts must check the exit code, capture stdout and stderr separately, verify `schemaVersion`, and branch on `ok` before reading `data`.
+
+Process exit codes are `0` for success, `2` for validation, not-found, and root-discovery failures, and `1` for other operational failures.
 
 Important `data` contracts:
 

@@ -99,6 +99,15 @@ For scripts, check both the process exit code and the envelope. Recognized JSON-
 
 `validate` writes warnings and errors to stderr. It still writes `OK` to stdout when there are warnings but no errors, so scripts must not treat any stderr output as automatic validation failure.
 
+## Handle executable version and upgrades safely
+
+- Print the build version with `relo -v` or `relo --version`; there is no `relo version` subcommand.
+- `relo upgrade --check` queries the latest stable release without inspecting or replacing the executable, so it remains available for package-manager-owned installations. `relo upgrade` installs only a newer latest stable release and does not downgrade.
+- `relo upgrade --version VERSION` selects an exact release, including a prerelease or an older version. It cannot be combined with `--check`.
+- When presenting multiple upgrade forms, state each form's distinct effect explicitly rather than listing syntax alone.
+- Describe package-manager ownership as an installation-mode restriction, not a blanket upgrade restriction: `--check` remains available, while installation modes refuse an executable detected as package-manager-owned. For a manual installation, relo verifies the archive against `checksums.txt` with SHA-256 and confirms the current executable has not changed since inspection before replacement.
+- Version and upgrade operations are project-independent, use human output only, and do not support JSON.
+
 ## Troubleshoot through supported reads
 
 - **Unknown command or flag:** compare `relo --version`, root help, and the relevant subcommand help with the reference. Do not substitute a stale spelling.

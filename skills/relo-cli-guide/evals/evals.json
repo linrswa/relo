@@ -40,7 +40,7 @@
         "The answer distinguishes anchor-based readiness from complete anchor-plus-transitive-dependency validation at mark time.",
         "The answer states that milestones do not affect task dependencies, readiness, or start legality and that marked records are immutable snapshots.",
         "The answer explains default active checkpoint overlays, --all-milestones, --tasks-only, and task-only graph JSON without combining tree-only flags with JSON.",
-        "No command is executed and no delivery recommendation is made about whether a milestone should exist."
+        "No mutation command is executed, no project state is changed, and no delivery recommendation is made about whether a milestone should exist."
       ]
     },
     {
@@ -67,8 +67,10 @@
         "The answer shows upgrade --check, upgrade, and upgrade --version v0.9.0-rc.2 with their distinct effects.",
         "The answer explains that default latest mode does not downgrade while an exact different version may select an older release.",
         "The answer states that --check and --version are mutually exclusive and that the official archive is verified against checksums.txt using SHA-256 before replacement.",
-        "The answer states that detected package-manager-owned installs are refused and must use their manager.",
-        "The answer states that version and upgrade are project-independent, upgrade is human-output only, and no command or network operation is executed."
+        "The answer states that installation modes refuse detected package-manager-owned installs and require their manager, while --check remains available because it does not replace the executable.",
+        "The answer states that version and upgrade are project-independent, both use human output only, and neither supports JSON.",
+        "The answer states that SHA-256 and the unchanged identity of the current executable are verified before replacement.",
+        "No network request or executable-changing operation is executed; read-only help or version discovery is permitted."
       ]
     },
     {
@@ -78,7 +80,7 @@
       "files": ["evals/files/sample-prd.md"],
       "expectations": [
         "The response explicitly identifies PRD decomposition, priority selection, milestone strategy, worker coordination, implementation verification, and completion as outside the CLI guide's responsibility.",
-        "The response names relo-delivery-workflow as the appropriate skill or workflow for the request.",
+        "The response names relo-delivery-workflow as the appropriate skill or workflow for the request and does not imply it was invoked when only the CLI guide is available.",
         "The response explains that the CLI guide can supply exact commands and legal state mechanics once delivery decisions exist.",
         "No relo project, task, dependency, attempt, or milestone mutation is executed.",
         "No subagent or worker is launched.",
