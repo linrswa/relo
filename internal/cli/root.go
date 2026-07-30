@@ -36,9 +36,14 @@ func Execute() int {
 	jsonErrorWritten = false
 	a := &app{}
 	cmd := a.rootCmd()
-	if _, _, err := cmd.Find(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
+	args := os.Args[1:]
+	cmd.InitDefaultHelpCmd()
+	cmd.InitDefaultCompletionCmd(args...)
+	if !isShellCompletionRequest(args) {
+		if _, _, err := cmd.Find(args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
 	}
 	if err := cmd.Execute(); err != nil {
 		jsonMode := argsRequestJSON(os.Args[1:])
@@ -49,7 +54,7 @@ func Execute() int {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		var ve store.ValidationError
-		if errors.As(err, &ve) || errors.Is(err, sql.ErrNoRows) {
+		if errors.As(err, &ve) || errors.Is(err, sql.ErrNoRows) || isShellCompletionRequest(args) {
 			return 2
 		}
 		return 1
@@ -75,6 +80,10 @@ func argsRequestJSON(args []string) bool {
 		}
 	}
 	return false
+}
+
+func isShellCompletionRequest(args []string) bool {
+	return len(args) > 0 && (args[0] == cobra.ShellCompRequestCmd || args[0] == cobra.ShellCompNoDescRequestCmd)
 }
 
 func (a *app) rootCmd() *cobra.Command {

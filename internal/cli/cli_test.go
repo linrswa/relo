@@ -1266,3 +1266,33 @@ func TestCLIObjectiveHelpRecoveryAndWarnings(t *testing.T) {
 		t.Fatalf("create help=%q", out)
 	}
 }
+
+func TestCLIDefaultHelpAndCompletionCommands(t *testing.T) {
+	root := t.TempDir()
+	out, stderr, err := run(t, root, "help", "task")
+	if err != nil || stderr != "" || !strings.Contains(out, "relo task [command]") {
+		t.Fatalf("help task: out=%q stderr=%q err=%v", out, stderr, err)
+	}
+
+	out, stderr, err = run(t, root, "completion", "bash")
+	if err != nil || stderr != "" || !strings.Contains(out, "__start_relo") {
+		t.Fatalf("completion bash: out=%q stderr=%q err=%v", out, stderr, err)
+	}
+
+	out, stderr, err = run(t, root, "__complete", "ta")
+	if err != nil || !strings.Contains(out, "task\t") || !strings.Contains(out, ":4") || !strings.Contains(stderr, "Completion ended with directive") {
+		t.Fatalf("shell completion request: out=%q stderr=%q err=%v", out, stderr, err)
+	}
+
+	out, stderr, err = run(t, root, "__completeNoDesc", "ta")
+	if err != nil || !strings.Contains(out, "task\n") || strings.Contains(out, "task\t") || !strings.Contains(out, ":4") || !strings.Contains(stderr, "Completion ended with directive") {
+		t.Fatalf("description-free completion request: out=%q stderr=%q err=%v", out, stderr, err)
+	}
+
+	for _, request := range []string{"__complete", "__completeNoDesc"} {
+		out, stderr, err = run(t, root, request)
+		if exitCode(err) != 2 || out != "" || !strings.Contains(stderr, "requires at least 1 arg") {
+			t.Fatalf("malformed %s request: out=%q stderr=%q err=%v", request, out, stderr, err)
+		}
+	}
+}
